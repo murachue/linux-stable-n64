@@ -1,0 +1,8 @@
+#
+# Nintendo 64 stuff
+#
+core-$(CONFIG_NINTENDO64)		+= arch/mips/nintendo64/
+cflags-$(CONFIG_NINTENDO64)		+= -I$(srctree)/arch/mips/include/asm/mach-nintendo64
+
+load-$(CONFIG_NINTENDO64)	+= 0xffffffff80000000
+#cflags-$(CONFIG_NINTENDO64)	+= -I$(srctree)/arch/mips/include/asm/mach-nintendo64/nintendo64

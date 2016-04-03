@@ -20,6 +20,7 @@ platforms += loongson64
 platforms += mti-malta
 platforms += mti-sead3
 platforms += netlogic
+platforms += nintendo64
 platforms += paravirt
 platforms += pistachio
 platforms += pmcs-msp71xx
