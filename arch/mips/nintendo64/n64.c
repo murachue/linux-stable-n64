@@ -106,3 +106,13 @@ void __init plat_time_init(void)
 void __init prom_free_prom_memory(void)
 {
 }
+
+#ifdef CONFIG_EARLY_PRINTK
+#define EARLY_UART_BASE		0x007F0000
+static __iomem void *uart_membase = (__iomem void *) KSEG1ADDR(EARLY_UART_BASE);
+void prom_putchar(unsigned char ch)
+{
+	__raw_writeb(ch, uart_membase);
+	uart_membase++;
+}
+#endif

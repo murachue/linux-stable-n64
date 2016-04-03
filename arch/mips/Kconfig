@@ -543,6 +543,7 @@ config NINTENDO64
 	select SYS_SUPPORTS_64BIT_KERNEL
 	select USE_OF
 	select BUILTIN_DTB
+	select SYS_HAS_EARLY_PRINTK
 	help
 	  Support for Nintendo 64.
 
