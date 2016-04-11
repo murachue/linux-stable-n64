@@ -6,59 +6,26 @@
 	compatible = "nintendo,nintendo64";
 	model = "Nintendo 64 8MiB memory";
 
+	chosen {
+		bootargs = "console=console";
+	};
+
 	cpus {
 		cpu@0 {
-			compatible = "mips,mips1";
+			compatible = "mips,mips3";
 		};
 	};
 
-	// dummy
 	cpuintc: cpuintc@0 {
-		#address-cells = <0>;
-		#interrupt-cells = <1>;
-		interrupt-controller;
 		compatible = "mti,cpu-interrupt-controller";
-	};
+		//#address-cells = <0>;
 
-	// dummy
-	palmbus@10000000 {
-		compatible = "palmbus";
-		reg = <0x10000000 0x200000>;
-		ranges = <0x0 0x10000000 0x1FFFFF>;
-
-		#address-cells = <1>;
-		#size-cells = <1>;
-
-		sysc@0 {
-			compatible = "ralink,rt3052-sysc", "ralink,rt3050-sysc";
-			reg = <0x0 0x100>;
-		};
-
-		intc: intc@200 {
-			compatible = "ralink,rt3052-intc", "ralink,rt2880-intc";
-			reg = <0x200 0x100>;
-
-			interrupt-controller;
-			#interrupt-cells = <1>;
-
-			interrupt-parent = <&cpuintc>;
-			interrupts = <2>;
-		};
-
-		memc@300 {
-			compatible = "ralink,rt3052-memc", "ralink,rt3050-memc";
-			reg = <0x300 0x100>;
-		};
-
-		uartlite@c00 {
-			compatible = "ralink,rt3052-uart", "ralink,rt2880-uart", "ns16550a";
-			reg = <0xc00 0x100>;
-
-			interrupt-parent = <&intc>;
-			interrupts = <12>;
-
-			reg-shift = <2>;
-		};
+		interrupt-controller;
+		#interrupt-cells = <1>;
+		// from mupen64plus:
+		// IM/IP2: MI_INTR
+		// IM/IP4: HW2? (reset button?)
+		// IM/IP7: Compare (also noted in 007-2489-001.pdf pp.104(134/754 pdf pages))
 	};
 
 	memory@0 {
@@ -66,14 +33,79 @@
 		reg = <0x0 0x800000>;
 	};
 
-	chosen {
-		bootargs = "console=console";
+	sp@4000000 {
+		compatible = "nintendo,sp";
+		reg = <0x04000000 0x2000 0x04040000 0x20 0x04080000 0x8>;
+
+		interrupt-parent = <&miintc>;
+		interrupts = <0>;
+	};
+
+	dp@4100000 {
+		compatible = "nintendo,dp";
+		reg = <0x04100000 0x20>;
+
+		interrupt-parent = <&miintc>;
+		interrupts = <5>;
+	};
+
+	dpspan@4200000 {
+		compatible = "nintendo,dpspan";
+		reg = <0x04200000 0x10>;
+	};
+
+	miintc: mi@4300000 {
+		compatible = "nintendo,mi";
+		reg = <0x04300000 0x10>;
+
+		interrupt-controller;
+		#interrupt-cells = <1>;
+
+		interrupt-parent = <&cpuintc>;
+		interrupts = <2>;
+	};
+
+	vi@4400000 {
+		compatible = "nintendo,vi";
+		reg = <0x04400000 0x38>;
+
+		interrupt-parent = <&miintc>;
+		interrupts = <3>;
+	};
+
+	ai@4500000 {
+		compatible = "nintendo,ai";
+		reg = <0x04500000 0x18>;
+
+		interrupt-parent = <&miintc>;
+		interrupts = <2>;
+	};
+
+	pi@4600000 {
+		compatible = "nintendo,pi";
+		reg = <0x04600000 0x34>;
+
+		interrupt-parent = <&miintc>;
+		interrupts = <4>;
+	};
+
+	ri@4700000 {
+		compatible = "nintendo,ri";
+		reg = <0x04700000 0x20>;
+	};
+
+	si@4800000 {
+		compatible = "nintendo,si";
+		reg = <0x04800000 0x1c>;
+
+		interrupt-parent = <&miintc>;
+		interrupts = <1>;
 	};
 
 	// dummy
-	cfi@1f000000 {
-		compatible = "cfi-flash";
-		reg = <0x1f000000 0x800000>;
+	n64cart@10000000 {
+		compatible = "nintendo,cart";
+		reg = <0x10000000 0x800000>;
 
 		bank-width = <2>;
 		device-width = <2>;
