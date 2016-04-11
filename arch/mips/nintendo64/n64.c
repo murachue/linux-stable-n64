@@ -112,8 +112,13 @@ void __init prom_free_prom_memory(void)
 static __iomem void *uart_membase = (__iomem void *) KSEG1ADDR(EARLY_UART_BASE);
 void prom_putchar(unsigned char ch)
 {
+	/*
 	__raw_writeb(ch, uart_membase);
 	uart_membase++;
+	/*/
+	__raw_writeb(ch, KSEG1ADDR(0x04400038));
+	//*/
+}
 #endif
 
 #ifdef CONFIG_CPU_HAS_WB
