@@ -114,5 +114,26 @@ void prom_putchar(unsigned char ch)
 {
 	__raw_writeb(ch, uart_membase);
 	uart_membase++;
+#endif
+
+#ifdef CONFIG_CPU_HAS_WB
+#include <linux/init.h>
+#include <asm/bootinfo.h>
+#include <asm/wbflush.h>
+#include <asm/barrier.h>
+
+static void wbflush_mips(void)
+{
+	__fast_iob();
 }
+
+void (*__wbflush) (void);
+
+void __init wbflush_setup(void)
+{
+	__wbflush = wbflush_mips;
+}
+
+#include <linux/module.h>
+EXPORT_SYMBOL(__wbflush);
 #endif
