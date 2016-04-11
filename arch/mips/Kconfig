@@ -532,15 +532,22 @@ config MACH_VR41XX
 
 config NINTENDO64
 	bool "Nintendo 64 (VR4300i)"
-	select CEVT_R4K
-	select CSRC_R4K
+# -march=r4300, ISA_MIPS3(in gcc), no wbflush, tne for BUG() (patched to disable for N64)
 	select SYS_HAS_CPU_R4300
+#?
+	select CEVT_R4K
+#?
+	select CSRC_R4K
+#?
 	select DMA_NONCOHERENT
+#?
 	select BOOT_RAW
+# IRQ_MIPS_CPU: drivers/irqchip/irq-mips-cpu (OpenFirm DevTree)
 	select IRQ_MIPS_CPU
 	select SYS_SUPPORTS_BIG_ENDIAN
 	select SYS_SUPPORTS_32BIT_KERNEL
 	select SYS_SUPPORTS_64BIT_KERNEL
+# "OpenFirmware": DevTree support
 	select USE_OF
 	select BUILTIN_DTB
 	select SYS_HAS_EARLY_PRINTK
