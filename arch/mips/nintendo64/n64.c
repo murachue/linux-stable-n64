@@ -75,9 +75,9 @@ void __init plat_mem_setup(void)
 	 */
 	__dt_setup_arch(__dtb_start);
 
-	of_scan_flat_dt(early_init_dt_find_memory, NULL);
+	of_scan_flat_dt(early_init_dt_find_memory, NULL/*unused by callback*/);
 	if (memory_dtb)
-		of_scan_flat_dt(early_init_dt_scan_memory, NULL);
+		of_scan_flat_dt(early_init_dt_scan_memory, NULL/*unused by callback...by spec?*/);
 //	else if (soc_info.mem_size)
 //		add_memory_region(soc_info.mem_base, soc_info.mem_size * SZ_1M,
 //				BOOT_MEM_RAM);
