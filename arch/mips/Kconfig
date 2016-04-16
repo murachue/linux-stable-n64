@@ -549,7 +549,6 @@ config NINTENDO64
 	select SYS_SUPPORTS_64BIT_KERNEL
 # "OpenFirmware": DevTree support
 	select USE_OF
-	select BUILTIN_DTB
 	select SYS_HAS_EARLY_PRINTK
 	help
 	  Support for Nintendo 64.
@@ -1015,6 +1014,7 @@ source "arch/mips/cavium-octeon/Kconfig"
 source "arch/mips/loongson32/Kconfig"
 source "arch/mips/loongson64/Kconfig"
 source "arch/mips/netlogic/Kconfig"
+source "arch/mips/nintendo64/Kconfig"
 source "arch/mips/paravirt/Kconfig"
 source "arch/mips/xilfpga/Kconfig"
 

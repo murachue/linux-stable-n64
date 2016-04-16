@@ -4,6 +4,7 @@ dts-dirs	+= ingenic
 dts-dirs	+= lantiq
 dts-dirs	+= mti
 dts-dirs	+= netlogic
+dts-dirs	+= nintendo
 dts-dirs	+= qca
 dts-dirs	+= ralink
 dts-dirs	+= xilfpga
