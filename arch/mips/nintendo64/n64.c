@@ -116,7 +116,7 @@ void prom_putchar(unsigned char ch)
 	__raw_writeb(ch, uart_membase);
 	uart_membase++;
 	/*/
-	__raw_writeb(ch, KSEG1ADDR(0x04400038));
+	__raw_writel(ch, KSEG1ADDR(0x04400038));
 	//*/
 }
 #endif
