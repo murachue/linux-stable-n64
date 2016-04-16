@@ -72,6 +72,7 @@ void __init plat_mem_setup(void)
 	/*
 	 * Load the builtin devicetree. This causes the chosen node to be
 	 * parsed resulting in our memory appearing
+	 * This is NOT the appended dtb!
 	 */
 	__dt_setup_arch(__dtb_start);
 
