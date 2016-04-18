@@ -534,9 +534,9 @@ config NINTENDO64
 	bool "Nintendo 64 (VR4300i)"
 # -march=r4300, ISA_MIPS3(in gcc), no wbflush, tne for BUG() (patched to disable for N64)
 	select SYS_HAS_CPU_R4300
-#?
+# can use R4000 series' CP0 count/compare register as clock event (to interrupt when period passed)
 	select CEVT_R4K
-#?
+# can use R4000 series' CP0 count/compare register as clock source (to get how long we passed)
 	select CSRC_R4K
 #?
 	select DMA_NONCOHERENT
@@ -545,7 +545,9 @@ config NINTENDO64
 # IRQ_MIPS_CPU: drivers/irqchip/irq-mips-cpu (OpenFirm DevTree)
 	select IRQ_MIPS_CPU
 	select SYS_SUPPORTS_BIG_ENDIAN
+# R4300 supports 32bit kernel(CPU_..32..), and N64 supports too(SYS_..32..).
 	select SYS_SUPPORTS_32BIT_KERNEL
+# R4300 supports 64bit kernel(CPU_..64..), and N64 supports too(SYS_..32..).
 	select SYS_SUPPORTS_64BIT_KERNEL
 # "OpenFirmware": DevTree support
 	select USE_OF
