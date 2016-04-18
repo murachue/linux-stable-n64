@@ -117,7 +117,8 @@ int c0_compare_int_usable(void)
 	unsigned int delta;
 	unsigned int cnt;
 
-#ifdef CONFIG_KVM_GUEST
+	/* some N64 emulators does not set IP7 in CP0 Cause reg, leading this to return 0, even there are no devices disturbing IP7... */
+#if defined(CONFIG_KVM_GUEST) || defined(CONFIG_NINTENDO64)
     return 1;
 #endif
 
