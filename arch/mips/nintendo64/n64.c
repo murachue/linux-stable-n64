@@ -21,6 +21,7 @@ arch/mips/built-in.o: In function `free_initmem':
 #include <asm/bootinfo.h> //detect_memory_region
 #include <asm/irq_cpu.h> //mips_cpu_irq_of_init
 #include <asm/prom.h> //__dt_setup_arch
+#include <asm/time.h> //mips_hpt_frequency
 
 const char *get_system_type(void) {
 	// TODO: refer dts:model?
@@ -100,8 +101,12 @@ void __init plat_time_init(void)
 //		panic("unable to get CPU clock, err=%ld", PTR_ERR(clk));
 //	pr_info("CPU Clock: %ldMHz\n", clk_get_rate(clk) / 1000000);
 //	mips_hpt_frequency = clk_get_rate(clk) / 2;
+
+	/* timer frequency is 1/2 clock rate (93.75MHz/2) */
+	mips_hpt_frequency = 93750000/2;
+
 //	clk_put(clk);
-//	clocksource_probe();
+	clocksource_probe();
 }
 
 void __init prom_free_prom_memory(void)
