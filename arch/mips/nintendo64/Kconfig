@@ -12,4 +12,11 @@ choice
 
 endchoice
 
+config NINTENDO64_EMUHACK
+	bool "Nintendo 64 emulator workaround"
+	help
+	  Some N64 emulators does not emulate R4300 accurately.
+	  If you say Y here, N64Linux will run on such emulators.
+	  You do not need to say Y if you run N64Linux on a real N64.
+
 endif

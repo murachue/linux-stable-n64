@@ -16,7 +16,7 @@ static inline void __noreturn BUG(void)
 
 #define HAVE_ARCH_BUG
 
-#if (_MIPS_ISA > _MIPS_ISA_MIPS1 && !CONFIG_NINTENDO64)
+#if (_MIPS_ISA > _MIPS_ISA_MIPS1 && !CONFIG_NINTENDO64_EMUHACK)
 
 static inline void  __BUG_ON(unsigned long condition)
 {
