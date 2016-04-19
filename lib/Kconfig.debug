@@ -167,6 +167,17 @@ config DEBUG_INFO_DWARF4
 	  But it significantly improves the success of resolving
 	  variables in gdb on optimized code.
 
+config CC_DISABLE_OPTIMIZE
+	bool "Disable C compiler optimization"
+	help
+	  Pass -O0 (oh-zero) to C compiler.
+	  This option effects over "Optimize for size."
+
+	  WARNING: Your build will fail if enabled.
+	  See:
+	    http://www.spinics.net/lists/arm-kernel/msg435802.html
+	    http://lists.infradead.org/pipermail/linux-arm-kernel/2015-November/388315.html
+
 config GDB_SCRIPTS
 	bool "Provide GDB scripts for kernel debugging"
 	depends on DEBUG_INFO
