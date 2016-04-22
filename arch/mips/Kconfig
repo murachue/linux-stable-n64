@@ -540,7 +540,7 @@ config NINTENDO64
 	select CSRC_R4K
 #?
 	select DMA_NONCOHERENT
-#?
+# Boot to binary(vmlinux.bin), not ELF.
 	select BOOT_RAW
 # IRQ_MIPS_CPU: drivers/irqchip/irq-mips-cpu (OpenFirm DevTree)
 	select IRQ_MIPS_CPU
@@ -549,7 +549,7 @@ config NINTENDO64
 	select SYS_SUPPORTS_32BIT_KERNEL
 # R4300 supports 64bit kernel(CPU_..64..), and N64 supports too(SYS_..32..).
 	select SYS_SUPPORTS_64BIT_KERNEL
-# "OpenFirmware": DevTree support
+# Use Open Firmware(DevTree support).
 	select USE_OF
 	select SYS_HAS_EARLY_PRINTK
 	help
