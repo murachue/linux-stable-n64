@@ -1,5 +1,7 @@
 /dts-v1/;
 
+/* note: N64 external bus is 32bit, so #address-cells=<1> on 64bit too is ok. */
+
 / {
 	#address-cells = <1>;
 	#size-cells = <1>;
