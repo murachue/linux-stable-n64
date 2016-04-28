@@ -154,7 +154,7 @@ static int n64vifb_init_device(struct device_node *dp)
 	reg[12] = 0x00000400; // VI_X_SCALE_REG subpx_off=0.0(2.10f) scaleup=1/1.0(2.10f)
 	reg[13] = 0x02000800; // VI_Y_SCALE_REG subpx_off=0.5(2.10f) scaleup=1/2.0(2.10f)
 
-	info->var = n64vifb_var;
+	info->var = n64vifb_var; /* copy whole struct */
 	info->fix = n64vifb_fix;
 	info->fbops = &n64vifb_ops;
 	info->flags = FBINFO_DEFAULT;
@@ -180,7 +180,7 @@ static int n64vifb_init_device(struct device_node *dp)
 	fb_info(info, "Nintendo 64 VI frame buffer %dx%dx%d at 0x%p.\n"
 		,n64vifb_var.xres_virtual
 		,n64vifb_var.yres_virtual
-		,1 << n64vifb_var.bits_per_pixel
+		,n64vifb_var.bits_per_pixel
 		,(void*)n64vifb_fix.smem_start /* TODO this is unsigned long, could be casted to void-ptr?? */
 		);
 	return 0;
