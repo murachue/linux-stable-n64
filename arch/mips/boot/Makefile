@@ -100,3 +100,17 @@ $(obj)/uImage.lzo: $(obj)/vmlinux.bin.lzo FORCE
 $(obj)/uImage: $(obj)/uImage.$(suffix-y)
 	@ln -sf $(notdir $<) $@
 	@echo '  Image $@ is ready'
+
+#
+# Nintendo 64 ROM image; buildroot specific!
+#
+
+targets += vmlinux.n64
+quiet_cmd_n64rom = N64ROM  $@
+      cmd_n64rom = \
+	$(CC) -save-temps -D VMLINUX_BIN=\"$(obj)/vmlinux.bin\" -nostdlib -Wa,-non_shared -Wl,-T,$(src)/n64linux.ld -o $(obj)/vmlinux.n64.elf $(src)/n64load.S; \
+	$(OBJCOPY) -O binary -j .text -j .data $(obj)/vmlinux.n64.elf $(obj)/vmlinux.n64.bin; \
+	$(HOST_DIR)/usr/bin/n64tool -l 4M -h $(HOST_DIR)/usr/lib/header -t "N64Linux" -o $(obj)/vmlinux.n64 $(obj)/vmlinux.n64.bin; \
+	$(HOST_DIR)/usr/bin/chksum64 $(obj)/vmlinux.n64
+$(obj)/vmlinux.n64: $(obj)/vmlinux.bin FORCE
+	$(call if_changed,n64rom)

@@ -299,6 +299,7 @@ drivers-$(CONFIG_PM)	+= arch/mips/power/
 boot-y			:= vmlinux.bin
 boot-y			+= vmlinux.ecoff
 boot-y			+= vmlinux.srec
+boot-y			+= vmlinux.n64
 ifeq ($(shell expr $(load-y) \< 0xffffffff80000000 2> /dev/null), 0)
 boot-y			+= uImage
 boot-y			+= uImage.bin
@@ -402,6 +403,7 @@ define archhelp
 	echo '  vmlinux.ecoff        - ECOFF boot image'
 	echo '  vmlinux.bin          - Raw binary boot image'
 	echo '  vmlinux.srec         - SREC boot image'
+	echo '  vmlinux.n64          - Nintendo 64 cartridge boot image'
 	echo '  vmlinux.32           - 64-bit boot image wrapped in 32bits (IP22/IP32)'
 	echo '  vmlinuz              - Compressed boot(zboot) image'
 	echo '  vmlinuz.ecoff        - ECOFF zboot image'
