@@ -3,7 +3,8 @@ ENTRY(start)
 MEMORY {
  /* libdragon's header's entry point is 80000400. */
  ram : ORIGIN = 0xFFFFffff80000400, LENGTH = 8M - 0x400
- rom : ORIGIN = 0x10000000, LENGTH = 32M
+ /* N64 program starts from 0x1000. */
+ rom : ORIGIN = 0x10001000, LENGTH = 32M - 0x1000
 }
 SECTIONS
 {
