@@ -51,8 +51,7 @@ start:
 	/* load vmlinux */
 	/* we don't wait DMA, we assume DMA is ready. */
 	la $t1, 0xA4600000 /* PI base */
-	la $t0, 0x00000000 /* phys-ram addr */
-	sw $t0, 0x00($t1) /* PI_DRAM_ADDR_REG */
+	sw $zero, 0x00($t1) /* PI_DRAM_ADDR_REG, phys-ram addr = 0 */
 	la $t0, vmlinux_bin_start_load /* it is phys-addr calc'd at ldscript */
 	sw $t0, 0x04($t1) /* PI_CART_ADDR_REG */
 	la $t0, vmlinux_bin_size - 1 /* note: Length must be >0. At most 7 bytes are xferred more. */
