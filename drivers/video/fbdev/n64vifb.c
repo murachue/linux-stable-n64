@@ -91,7 +91,8 @@ static int n64vifb_init_device(struct device_node *dp)
 	int r;
 	u32 regs[2];
 	u32 *reg;
-	void *fb_start, *fb_start_nocache;
+	void *fb_start_vm, *fb_start_nocache;
+	u32 fb_start_pm; /* N64 bus is 32bit, u32 instead of uintptr_t is ok. */
 	struct fb_info *info;
 
 	r = of_property_read_u32_array(dp, "reg", regs, 2);
@@ -109,19 +110,21 @@ static int n64vifb_init_device(struct device_node *dp)
 
 	// dma_alloc_writecombine...? dma_alloc_coherent...? __get_free_pages(GFP_KERNEL|__GFP_ZERO,get_order(vmem_size))???
 	// We need physically contiguous memory, so can't use vmalloc family.
-	fb_start = kzalloc(n64vifb_fix.smem_len, GFP_KERNEL);
-	if (!n64vifb_fix.smem_start) {
+	fb_start_vm = kzalloc(n64vifb_fix.smem_len, GFP_KERNEL);
+	if (!fb_start_vm) {
 		printk(KERN_ERR "n64vifb: could not allocate frame buffer memory\n");
-		kfree(fb_start);
+		kfree(fb_start_vm);
 		return -ENOMEM;
 	}
 
+	fb_start_pm = virt_to_phys(fb_start_vm);
+
 	/* TODO this too. (that is true on N64 too.) if >=512M then...? if 64bit then...? */
 	/* TODO is it OK to ioremap_nocache for kalloc'ed area?? */
-	fb_start_nocache = ioremap_nocache((uintptr_t)fb_start, n64vifb_fix.smem_len);
+	fb_start_nocache = ioremap_nocache(fb_start_pm, n64vifb_fix.smem_len);
 	if (!fb_start_nocache) {
 		printk(KERN_ERR "n64vifb: could not get nocache area for frame buffer memory\n");
-		kfree(fb_start);
+		kfree(fb_start_vm);
 		return -ENOMEM;
 	}
 
@@ -130,7 +133,7 @@ static int n64vifb_init_device(struct device_node *dp)
 	info = framebuffer_alloc(sizeof(u32) * 16/* for 16-colors pseudo palette */, NULL);
 	if (!info) {
 		printk(KERN_ERR "n64vifb: could not allocate framebuffer info\n");
-		kfree(fb_start);
+		kfree(fb_start_vm);
 		return -ENOMEM;
 	}
 
@@ -161,7 +164,7 @@ static int n64vifb_init_device(struct device_node *dp)
 
 	if (fb_alloc_cmap(&info->cmap, 256, 0) < 0) {
 		printk(KERN_ERR "n64vifb: could not allocate color map\n");
-		kfree(fb_start);
+		kfree(fb_start_vm);
 		framebuffer_release(info);
 		return -ENOMEM;
 	}
@@ -169,7 +172,7 @@ static int n64vifb_init_device(struct device_node *dp)
 	if (register_framebuffer(info) < 0) {
 		printk(KERN_ERR "n64vifb: unable to register N64VI frame buffer\n");
 		fb_dealloc_cmap(&info->cmap);
-		kfree(fb_start);
+		kfree(fb_start_vm);
 		framebuffer_release(info);
 		return -EINVAL;
 	}
@@ -232,7 +235,7 @@ int __init n64vifb_init(void)
 	}
 #endif
 
-	for (dp = NULL; (dp = of_find_compatible_node(dp, NULL, "nintendo,dp"));) {
+	for (dp = NULL; (dp = of_find_compatible_node(dp, NULL, "nintendo,vi"));) {
 		ret = n64vifb_init_device(dp);
 		if (ret) {
 			return ret;
