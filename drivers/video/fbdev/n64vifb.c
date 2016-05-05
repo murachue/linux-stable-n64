@@ -41,9 +41,9 @@ static struct fb_var_screeninfo n64vifb_var = {
 	.xres_virtual   = 640,
 	.yres_virtual   = 480,
 	.bits_per_pixel = 16,
-	.red            = {5, 5, 0},
-	.green          = {10, 5, 0},
-	.blue           = {0, 5, 0},
+	.red            = {6, 5, 0},
+	.green          = {11, 5, 0},
+	.blue           = {1, 5, 0},
 	.activate       = FB_ACTIVATE_NOW,
 	/* umm... why pixel dimension and physical dimension are merged? */
 	/* we assume display is 280x210mm, 13.7in 4:3 */
@@ -70,9 +70,9 @@ static int n64vifb_setcolreg(unsigned regno, unsigned red, unsigned green,
 
 	if (regno < 16) {
 		((u32 *)info->pseudo_palette)[regno] =
-			((red & 31) << 5) |
-			((green & 31) << 10) |
-			(blue & 31);
+			((red & 31) << 6) |
+			((green & 31) << 11) |
+			((blue & 31) << 1);
 	}
 	return 0;
 }
