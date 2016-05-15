@@ -547,4 +547,15 @@ config BLK_DEV_RSXX
 	  To compile this driver as a module, choose M here: the
 	  module will be called rsxx.
 
+config NINTENDO64_CART
+	bool "Nintendo 64 Cartridge"
+	depends on NINTENDO64
+	help
+	  Say Y here if you want to use cartridge as a block device.
+	  This driver provides it as 512-bytes size sectors.
+	  First few blocks are bootcode, and no partition schema can be
+	  applied, so for standard use, special workarounds will be required.
+	  (Ex. loopback mount with offsets.)
+	  Cartridge size is read from the device tree.
+
 endif # BLK_DEV
