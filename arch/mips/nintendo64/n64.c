@@ -12,6 +12,8 @@
 #include <linux/of_address.h> //of_address_to_resource
 #include <linux/of_fdt.h> //of_scan_flat_dt, __dtb_start
 #include <linux/of_irq.h> //of_irq_init
+#else
+#include <linux/platform_device.h> //platform_device_register
 #endif
 #include <linux/sizes.h> //SZ_1M
 #include <asm/addrspace.h> //KSEG1
@@ -247,6 +249,150 @@ void __init plat_time_init(void)
 void __init prom_free_prom_memory(void)
 {
 }
+
+int __init n64_register_devices(void)
+{
+	{
+		/* TODO should assign "name" field to IORES_MEMs for easy identifying in the driver? */
+		static struct resource reses[] = {
+			{ .flags = IORESOURCE_MEM, .start = 0x04000000, .end = 0x04001fff }, /* DMEM, IMEM */
+			{ .flags = IORESOURCE_MEM, .start = 0x04040000, .end = 0x0404001f }, /* status regs */
+			{ .flags = IORESOURCE_MEM, .start = 0x04080000, .end = 0x04080007 }, /* RSP PC, BIST? */
+			{ .flags = IORESOURCE_IRQ, .start = 8+0 /* mi:0 */ },
+		};
+		static struct platform_device dev = {
+			.name          = "n64sp",
+			.resource      = reses,
+			.num_resources = ARRAY_SIZE(reses),
+			/*.dev = {
+				.platform_data = 0,
+			},*/
+		};
+		platform_device_register(&dev);
+	}
+	{
+		static struct resource reses[] = {
+			{ .flags = IORESOURCE_MEM, .start = 0x04100000, .end = 0x0410001f },
+			{ .flags = IORESOURCE_IRQ, .start = 8+5 /* mi:5 */ },
+		};
+		static struct platform_device dev = {
+			.name          = "n64dp",
+			.resource      = reses,
+			.num_resources = ARRAY_SIZE(reses),
+			/*.dev = {
+				.platform_data = 0,
+			},*/
+		};
+		platform_device_register(&dev);
+	}
+	{
+		static struct resource reses[] = {
+			{ .flags = IORESOURCE_MEM, .start = 0x04200000, .end = 0x0420000f },
+		};
+		static struct platform_device dev = {
+			.name          = "n64dpspan",
+			.resource      = reses,
+			.num_resources = ARRAY_SIZE(reses),
+			/*.dev = {
+				.platform_data = 0,
+			},*/
+		};
+		platform_device_register(&dev);
+	}
+#if 0
+	{
+		static struct resource reses[] = {
+			{ .flags = IORESOURCE_MEM, .start = 0x04300000, .end = 0x0430000f },
+			{ .flags = IORESOURCE_IRQ, .start = 2 /* MIPS IRQ 2 */ },
+		};
+		static struct platform_device dev = {
+			.name          = "n64mi",
+			.resource      = reses,
+			.num_resources = ARRAY_SIZE(reses),
+			/*.dev = {
+				.platform_data = 0,
+			},*/
+		};
+		platform_device_register(&dev);
+	}
+#endif
+	{
+		static struct resource reses[] = {
+			{ .flags = IORESOURCE_MEM, .start = 0x04400000, .end = 0x04400037 },
+			{ .flags = IORESOURCE_IRQ, .start = 8+3 /* mi:3 */ },
+		};
+		static struct platform_device dev = {
+			.name          = "n64vi",
+			.resource      = reses,
+			.num_resources = ARRAY_SIZE(reses),
+			/*.dev = {
+				.platform_data = 0,
+			},*/
+		};
+		platform_device_register(&dev);
+	}
+	{
+		static struct resource reses[] = {
+			{ .flags = IORESOURCE_MEM, .start = 0x04500000, .end = 0x04500017 },
+			{ .flags = IORESOURCE_IRQ, .start = 8+2 /* mi:2 */ },
+		};
+		static struct platform_device dev = {
+			.name          = "n64ai",
+			.resource      = reses,
+			.num_resources = ARRAY_SIZE(reses),
+			/*.dev = {
+				.platform_data = 0,
+			},*/
+		};
+		platform_device_register(&dev);
+	}
+	{
+		static struct resource reses[] = {
+			{ .flags = IORESOURCE_MEM, .start = 0x04600000, .end = 0x04600033 },
+			{ .flags = IORESOURCE_IRQ, .start = 8+4 /* mi:4 */ },
+		};
+		static struct platform_device dev = {
+			.name          = "n64pi",
+			.resource      = reses,
+			.num_resources = ARRAY_SIZE(reses),
+			/*.dev = {
+				.platform_data = 0,
+			},*/
+		};
+		platform_device_register(&dev);
+	}
+	{
+		static struct resource reses[] = {
+			{ .flags = IORESOURCE_MEM, .start = 0x04700000, .end = 0x0470001f },
+		};
+		static struct platform_device dev = {
+			.name          = "n64ri",
+			.resource      = reses,
+			.num_resources = ARRAY_SIZE(reses),
+			/*.dev = {
+				.platform_data = 0,
+			},*/
+		};
+		platform_device_register(&dev);
+	}
+	{
+		static struct resource reses[] = {
+			{ .flags = IORESOURCE_MEM, .start = 0x04800000, .end = 0x0480001b },
+			{ .flags = IORESOURCE_IRQ, .start = 8+1 /* mi:1 */ },
+		};
+		static struct platform_device dev = {
+			.name          = "n64si",
+			.resource      = reses,
+			.num_resources = ARRAY_SIZE(reses),
+			/*.dev = {
+				.platform_data = 0,
+			},*/
+		};
+		platform_device_register(&dev);
+	}
+	return 0;
+}
+arch_initcall(n64_register_devices);
 
 #ifdef CONFIG_EARLY_PRINTK
 //#define EARLY_UART_BASE		0x007F0000
