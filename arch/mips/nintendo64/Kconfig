@@ -1,5 +1,15 @@
 if NINTENDO64
 
+config NINTENDO64_USE_DEVTREE
+	bool "Use device tree"
+	select USE_OF
+	help
+	  If you say Y, the OpenFirmware framework is enabled, and
+	  Nintendo 64 codes operates on a device tree with that.
+	  The kernel become little generic, but size become larger.
+
+if USE_OF
+
 choice
 	prompt "Devicetree selection"
 	default DTB_NINTENDO64
@@ -11,6 +21,8 @@ choice
 		select BUILTIN_DTB
 
 endchoice
+
+endif
 
 config NINTENDO64_EMUHACK
 	bool "Nintendo 64 emulator workaround"
