@@ -10,6 +10,10 @@
 #include <linux/blkdev.h>
 #include <linux/module.h>
 #include <linux/io.h>
+#include <linux/platform_device.h>
+#include <linux/hdreg.h> // struct hd_geometry
+#include <linux/interrupt.h>
+#include <asm/addrspace.h> // CPHYSADDR
 
 #define DEVICE_NAME "n64cart"
 #define PI_PHYSBASE 0x04600000
@@ -19,7 +23,7 @@
 /* redundant. should not be required? */
 static struct platform_driver n64cart_driver = {
 	.driver = {
-		.name = "n64cart",
+		.name = "n64pi",
 	},
 };
 
@@ -31,7 +35,7 @@ static void __iomem *membase;
 static void (*do_hd)(void) = NULL;
 
 #define SET_HANDLER(x) \
-	do { do_hd = (x) } while(0)
+	do { do_hd = (x); } while(0)
 
 static bool hd_end_request(int err, unsigned int bytes)
 {
@@ -51,23 +55,23 @@ static void hd_request (void);
 
 static void unexpected_hd_intr(void)
 {
-	printk(KERN_WARN "%s:%d: spurious interrupt\n", __func__, __LINE__);
+	pr_warn("%s:%d: spurious interrupt\n", __func__, __LINE__);
 }
 
 static void read_intr(void)
 {
 #ifdef DEBUG
-	printk("%s: read: pos=%ld, nsect=%u, buffer=%p\n",
+	pr_debug("%s: read: pos=%ld, nsect=%u, buffer=%p\n",
 	       hd_req->rq_disk->disk_name, blk_rq_pos(hd_req),
 	       blk_rq_sectors(hd_req), bio_data(hd_req->bio));
 #endif
 	/* acking for PI */
-	__raw_writel((u32 __iomem *)membase + 4, 2); // PI_STATUS
+	__raw_writel(2, membase + 0x10); // PI_STATUS
 
 	/* acking all blocks for kernel */
 	/* note: I am called from hd_interrupt, it locks queue. __blk_end_request requires that. */
 	if (__blk_end_request(hd_req, 0, blk_rq_cur_bytes(hd_req))) {
-		printk(KERN_WARN "%s:%d: %s read remains?? pos=%ld nsect=%u\n", __func__, __LINE__, hd_req->rq_disk->disk_name, blk_rq_pos(hd_req), blk_rq_sectors(hd_req));
+		pr_warn("%s:%d: %s read remains?? pos=%ld nsect=%u\n", __func__, __LINE__, hd_req->rq_disk->disk_name, blk_rq_pos(hd_req), blk_rq_sectors(hd_req));
 		SET_HANDLER(&read_intr);
 		return;
 	}
@@ -109,18 +113,13 @@ repeat:
 	block = blk_rq_pos(req);
 	nsect = blk_rq_sectors(req);
 	if (block >= get_capacity(req->rq_disk) || ((block+nsect) > get_capacity(req->rq_disk))) {
-		printk("%s: bad access: block=%d, count=%d\n", req->rq_disk->disk_name, block, nsect);
+		pr_err("%s: bad access: block=%d, count=%d\n", req->rq_disk->disk_name, block, nsect);
 		hd_end_request_cur(-EIO);
 		goto repeat;
 	}
 
-	if (disk->special_op) {
-		if (do_special_op(disk, req))
-			goto repeat;
-		return;
-	}
 #ifdef DEBUG
-	printk("%s: %sing: block=%d, sectors=%d, buffer=%p\n",
+	pr_debug("%s: %sing: block=%d, sectors=%d, buffer=%p\n",
 		req->rq_disk->disk_name,
 		req_data_dir(req) == READ ? "read" : "writ",
 		block, nsect, bio_data(req->bio));
@@ -129,23 +128,22 @@ repeat:
 		switch (rq_data_dir(req)) {
 		case READ:
 			{
-				u32 status = __raw_readl((u32 __iomem *)membase + 0);
+				u32 status = __raw_readl(membase + 0x00);
 				if((status & 7) != 0) {
-					printk("%s: PI busy status=%u\n", req->rq_disk->disk_name, status);
+					pr_err("%s: PI busy status=%u\n", req->rq_disk->disk_name, status);
 				}
 			}
 			SET_HANDLER(read_intr);
-			__raw_writel((u32 __iomem *)membase + 0, virt2phys(bio_data(req->bio))); // PI_DRAM_ADDR
-			__raw_writel((u32 __iomem *)membase + 1, 0x10000000 + block * 512); // PI_CART_ADDR
-			__raw_writel((u32 __iomem *)membase + 3, nsect * 512 - 1); // PI_WR_LEN
-			if (reset)
-				goto repeat;
+			/* TODO is CPHYSADDR correct?? no other virt2phys like func? */
+			__raw_writel(CPHYSADDR(bio_data(req->bio)), membase + 0x00); // PI_DRAM_ADDR
+			__raw_writel(0x10000000 + block * 512, membase + 0x04); // PI_CART_ADDR
+			__raw_writel(nsect * 512 - 1, membase + 0x0C); // PI_WR_LEN
 			break;
 		case WRITE:
 			hd_end_request_cur(-EROFS);
 			break;
 		default:
-			printk("unknown hd-command\n");
+			pr_err("unknown hd-command\n");
 			hd_end_request_cur(-EIO);
 			break;
 		}
@@ -197,10 +195,11 @@ static const struct block_device_operations hd_fops = {
 static int __init n64cart_init(void)
 {
 	int error;
+	struct gendisk *disk;
 
 	error = register_blkdev(0, DEVICE_NAME);
 	if (error <= 0) {
-		printk(KERN_ERR "%s:%u: register_blkdev failed %d\n", __func__, __LINE__, error);
+		pr_err("%s:%u: register_blkdev failed %d\n", __func__, __LINE__, error);
 		goto out_regblk;
 	}
 	n64cart_major = error;
@@ -209,7 +208,7 @@ static int __init n64cart_init(void)
 
 	hd_queue = blk_init_queue(do_hd_request, &hd_lock);
 	if (!hd_queue) {
-		printk(KERN_ERR "%s:%u: could not initialize queue\n", __func__, __LINE__);
+		pr_err("%s:%u: could not initialize queue\n", __func__, __LINE__);
 		error = -ENOMEM;
 		goto out_queue;
 	}
@@ -217,10 +216,10 @@ static int __init n64cart_init(void)
 	blk_queue_max_hw_sectors(hd_queue, 15); /* FIXME how sectors are good? */
 	blk_queue_logical_block_size(hd_queue, 512);
 
-	struct gendisk *disk = alloc_disk(64); /* max 64 minors(parts) */
+	disk = alloc_disk(64); /* max 64 minors(parts) */
 	disk->major = n64cart_major;
 	disk->first_minor = 0;
-	sprintf(disk->disk_name, "cart%c", '0'+drive);
+	sprintf(disk->disk_name, "cart%c", '0');
 	set_capacity(disk, 4*1024*1024/512); /* FIXME be configurable */
 	disk->fops = &hd_fops;
 	disk->queue = hd_queue;
@@ -229,26 +228,26 @@ static int __init n64cart_init(void)
 
 	error = request_irq(PI_IRQ, hd_interrupt, 0, DEVICE_NAME, NULL);
 	if (error) {
-		printk(KERN_ERR "%s:%u: unable to get IRQ%d for the Nintendo 64 cartridge driver\n", __func__, __LINE__, PI_IRQ);
+		pr_err("%s:%u: unable to get IRQ%d for the Nintendo 64 cartridge driver\n", __func__, __LINE__, PI_IRQ);
 		goto out_reqirq;
 	}
 
 	if (!request_mem_region(PI_PHYSBASE, PI_SIZE/*bytes*/, DEVICE_NAME)) {
-		printk(KERN_ERR "%s:%u: IOMEM 0x%x busy\n", __func__, __LINE__, PI_PHYSBASE);
+		pr_err("%s:%u: IOMEM 0x%x busy\n", __func__, __LINE__, PI_PHYSBASE);
 		error = -ENOMEM;
 		goto out_reqiomem;
 	}
 
 	membase = ioremap_nocache(PI_PHYSBASE, PI_SIZE/*bytes*/);
 	if (!membase) {
-		printk(KERN_ERR "%s:%u: could not get nocache area for IOMEM 0x%x\n", __func__, __LINE__, PI_PHYSBASE);
+		pr_err("%s:%u: could not get nocache area for IOMEM 0x%x\n", __func__, __LINE__, PI_PHYSBASE);
 		error = -ENOMEM;
 		goto out_ioremap;
 	}
 
 	error = platform_driver_register(&n64cart_driver);
 	if (error) {
-		printk(KERN_ERR "%s:%u: could not register platform driver\n", __func__, __LINE__);
+		pr_err("%s:%u: could not register platform driver\n", __func__, __LINE__);
 		goto out_drvreg;
 	}
 
@@ -273,7 +272,7 @@ static void __exit n64cart_exit(void)
 	iounmap(membase);
 	release_mem_region(PI_PHYSBASE, PI_SIZE);
 	free_irq(PI_IRQ, NULL);
-	put_disk(disk);
+	//put_disk(disk);
 	blk_cleanup_queue(hd_queue);
 	unregister_blkdev(n64cart_major, DEVICE_NAME);
 }
