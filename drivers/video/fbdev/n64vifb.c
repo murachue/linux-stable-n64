@@ -86,25 +86,20 @@ static struct fb_ops n64vifb_ops = {
 	.fb_imageblit = sys_imageblit,
 };
 
-static int n64vifb_init_device(struct device_node *dp)
+static int n64vifb_init_device(struct resource *reses)
 {
-	int r;
-	u32 regs[2];
+	int ret;
 	u32 *reg;
 	void *fb_start_vm, *fb_start_nocache;
 	u32 fb_start_pm; /* N64 bus is 32bit, u32 instead of uintptr_t is ok. */
 	struct fb_info *info;
 
-	r = of_property_read_u32_array(dp, "reg", regs, 2);
-	if (r) {
-		printk(KERN_ERR "n64vifb: could not get reg u32 array. errno=%d\n", r);
-		return r;
-	}
 	/* TODO ah... it works on regs[0]<512M(that is true in N64), if >=512M then...? if 64bit then...? */
-	reg = ioremap_nocache(regs[0], regs[1]);
+	reg = ioremap_nocache(reses[0].start, resource_size(&reses[0]));
 	if (!reg) {
-		printk(KERN_ERR "n64vifb: could not get nocache area for reg\n");
-		return -ENOMEM;
+		pr_err("n64vifb: could not get nocache area for reg\n");
+		ret = -ENOMEM;
+		goto out_ioreg;
 	}
 	/* TODO should save "reg" here */
 
@@ -112,47 +107,64 @@ static int n64vifb_init_device(struct device_node *dp)
 	// We need physically contiguous memory, so can't use vmalloc family.
 	fb_start_vm = kzalloc(n64vifb_fix.smem_len, GFP_KERNEL);
 	if (!fb_start_vm) {
-		printk(KERN_ERR "n64vifb: could not allocate frame buffer memory\n");
-		kfree(fb_start_vm);
-		return -ENOMEM;
+		pr_err("n64vifb: could not allocate frame buffer memory\n");
+		ret = -ENOMEM;
+		goto out_allocfbm;
+	}
+
+	/* XXX DEBUG */
+	{
+		int y;
+		for(y = 0; y < 480; y++) {
+			int x;
+			for(x = 0; x < 640; x++) {
+				*((u16*)fb_start_vm + (y*640+x)) = 0xFFff;
+			}
+		}
 	}
 
 	fb_start_pm = virt_to_phys(fb_start_vm);
 
+	if (0x800000 <= fb_start_pm) {
+		pr_err("n64vifb: allocated frame buffer memory at beyond designed area (0x800000 <= %x)\n", fb_start_pm);
+		ret = -ENOMEM;
+		goto out_physchk;
+	}
+
+	/* note: do not use fb_start_vm, it may be cached memory. */
 	/* TODO this too. (that is true on N64 too.) if >=512M then...? if 64bit then...? */
 	/* TODO is it OK to ioremap_nocache for kalloc'ed area?? */
 	fb_start_nocache = ioremap_nocache(fb_start_pm, n64vifb_fix.smem_len);
 	if (!fb_start_nocache) {
-		printk(KERN_ERR "n64vifb: could not get nocache area for frame buffer memory\n");
-		kfree(fb_start_vm);
-		return -ENOMEM;
+		pr_err("n64vifb: could not get nocache area for frame buffer memory\n");
+		ret = -ENOMEM;
+		goto out_iofb;
 	}
 
 	n64vifb_fix.smem_start = (unsigned long)fb_start_nocache;
 
 	info = framebuffer_alloc(sizeof(u32) * 16/* for 16-colors pseudo palette */, NULL);
 	if (!info) {
-		printk(KERN_ERR "n64vifb: could not allocate framebuffer info\n");
-		kfree(fb_start_vm);
-		return -ENOMEM;
+		pr_err("n64vifb: could not allocate framebuffer info\n");
+		ret = -ENOMEM;
+		goto out_fballoc;
 	}
 
 	/* initialize VI as 640x480 NTSC. from libdragon. */
-	/* TODO this should use writel_be? */
-	reg[0]  = 0x0001015e; // VI_CONTROL_REG: 16bit, gamma, gamma_dither, divot, aa_resamp_fetch_if_needed. 0x10000??
-	reg[1]  = (u32)n64vifb_fix.smem_start & 0x007Fffff; // VI_DRAM_ADDR (phys-addr)
-	reg[2]  = 0x00000280; // VI_WIDTH_REG (0d640=0x280)
-	//reg[3]  = 0x00000200; // VI_INTR_REG
-	//reg[4]  = 0x00000000; // VI_CURRENT_REG // writing clears VI intr.
-	reg[5]  = 0x03e52239; // VI_BURST(TIMING?)_REG
-	reg[6]  = 0x0000020c; // VI_V_SYNC_REG (0d524=0x20c)
-	reg[7]  = 0x00000c15; // VI_H_SYNC_REG
-	reg[8]  = 0x0c150c15; // VI_LEAP_REG(H_SYNC_LEAP?)
-	reg[9]  = 0x006c02ec; // VI_H_START_REG 108..748
-	reg[10] = 0x002301fd; // VI_V_START_REG  35..509
-	reg[11] = 0x000e0204; // VI_V_BURST_REG  14..516
-	reg[12] = 0x00000400; // VI_X_SCALE_REG subpx_off=0.0(2.10f) scaleup=1/1.0(2.10f)
-	reg[13] = 0x02000800; // VI_Y_SCALE_REG subpx_off=0.5(2.10f) scaleup=1/2.0(2.10f)
+	__raw_writel(0x0001015e, &reg[0]); // VI_CONTROL_REG: 16bit, gamma, gamma_dither, divot, aa_resamp_fetch_if_needed. 0x10000??
+	__raw_writel((u32)n64vifb_fix.smem_start & 0x007Fffff, &reg[1]); // VI_DRAM_ADDR (phys-addr)
+	__raw_writel(0x00000280, &reg[2]); // VI_WIDTH_REG (0d640=0x280)
+	//__raw_writel(0x00000200, &reg[3]); // VI_INTR_REG
+	//__raw_writel(0x00000000, &reg[4]); // VI_CURRENT_REG // writing clears VI intr.
+	__raw_writel(0x03e52239, &reg[5]); // VI_BURST(TIMING?)_REG
+	__raw_writel(0x0000020c, &reg[6]); // VI_V_SYNC_REG (0d524=0x20c)
+	__raw_writel(0x00000c15, &reg[7]); // VI_H_SYNC_REG
+	__raw_writel(0x0c150c15, &reg[8]); // VI_LEAP_REG(H_SYNC_LEAP?)
+	__raw_writel(0x006c02ec, &reg[9]); // VI_H_START_REG 108..748
+	__raw_writel(0x002301fd, &reg[10]); // VI_V_START_REG  35..509
+	__raw_writel(0x000e0204, &reg[11]); // VI_V_BURST_REG  14..516
+	__raw_writel(0x00000400, &reg[12]); // VI_X_SCALE_REG subpx_off=0.0(2.10f) scaleup=1/1.0(2.10f)
+	__raw_writel(0x02000800, &reg[13]); // VI_Y_SCALE_REG subpx_off=0.5(2.10f) scaleup=1/2.0(2.10f)
 
 	info->var = n64vifb_var; /* copy whole struct */
 	info->fix = n64vifb_fix;
@@ -163,18 +175,15 @@ static int n64vifb_init_device(struct device_node *dp)
 	info->screen_base = (char *) n64vifb_fix.smem_start;
 
 	if (fb_alloc_cmap(&info->cmap, 256, 0) < 0) {
-		printk(KERN_ERR "n64vifb: could not allocate color map\n");
-		kfree(fb_start_vm);
-		framebuffer_release(info);
-		return -ENOMEM;
+		pr_err("n64vifb: could not allocate color map\n");
+		ret = -ENOMEM;
+		goto out_cmap;
 	}
 
 	if (register_framebuffer(info) < 0) {
-		printk(KERN_ERR "n64vifb: unable to register N64VI frame buffer\n");
-		fb_dealloc_cmap(&info->cmap);
-		kfree(fb_start_vm);
-		framebuffer_release(info);
-		return -EINVAL;
+		pr_err("n64vifb: unable to register N64VI frame buffer\n");
+		ret = -EINVAL;
+		goto out_regfb;
 	}
 
 	fb_info(info, "Nintendo 64 VI frame buffer %dx%dx%d at 0x%p.\n"
@@ -184,17 +193,49 @@ static int n64vifb_init_device(struct device_node *dp)
 		,(void*)n64vifb_fix.smem_start /* TODO this is unsigned long, could be casted to void-ptr?? */
 		);
 	return 0;
+
+out_regfb:
+	fb_dealloc_cmap(&info->cmap);
+out_cmap:
+	framebuffer_release(info);
+out_fballoc:
+	iounmap(fb_start_nocache);
+out_iofb:
+out_physchk:
+	kfree(fb_start_vm);
+out_allocfbm:
+	iounmap(reg);
+out_ioreg:
+	return ret;
 }
 
-#if 0
+#ifdef CONFIG_USE_OF
+static int n64vifb_init_device_of(struct device_node *dp)
+{
+	int r;
+	u32 regs[2];
+	struct resource reses[2];
+
+	r = of_property_read_u32_array(dp, "reg", regs, 2);
+	if (r) {
+		printk(KERN_ERR "n64vifb: could not get reg u32 array. errno=%d\n", r);
+		return r;
+	}
+	reses[0].flags = IORESOURCE_MEM;
+	reses[0].start = regs[0];
+	reses[0].end = regs[0] + regs[1] - 1;
+	reses[1].flags = IORESOURCE_IRQ;
+	reses[1].start = of_irq_get(dp, 0);
+
+	n64vifb_init_device(reses);
+}
+#else /* CONFIG_USE_OF */
 static int n64vifb_probe(struct platform_device *dev)
 {
-	struct fb_info *info;
-
 #ifndef CONFIG_NINTENDO64
 	return -ENXIO;
 #endif
-
+	n64vifb_init_device(dev->resource);
 	return 0;
 }
 
@@ -202,45 +243,35 @@ static struct platform_driver n64vifb_driver = {
 	.probe  = n64vifb_probe,
 	.remove = 0, /* TODO impl */
 	.driver = {
-	    .name = "n64vifb",
+	    .name = "n64vi",
 	},
-};
-
-static struct platform_device n64vifb_device = {
-	.name = "n64vifb",
 };
 #endif
 
 int __init n64vifb_init(void)
 {
 	int ret = 0;
+#ifdef CONFIG_USE_OF
 	struct device_node *dp;
+#endif
 
 	/* fb_get_options returns 1 if specified name is explicitly "off", or something bad (non-"offb" while ofonly) */
 	if (fb_get_options("n64vifb", NULL))
 		return -ENODEV;
 
-	/* skip platform driver/device registering... */
-#if 0
-	ret = platform_driver_register(&n64vifb_driver);
-	if (ret) {
-		return ret;
-	}
-
-	ret = platform_device_register(&n64vifb_device);
-	if (ret) {
-		/* oops, registering device failed. unregister driver too. */
-		platform_driver_unregister(&n64vifb_driver);
-		return ret;
-	}
-#endif
-
+#ifdef CONFIG_USE_OF
 	for (dp = NULL; (dp = of_find_compatible_node(dp, NULL, "nintendo,vi"));) {
 		ret = n64vifb_init_device(dp);
 		if (ret) {
 			return ret;
 		}
 	}
+#else
+	ret = platform_driver_register(&n64vifb_driver);
+	if (ret) {
+		return ret;
+	}
+#endif
 
 	return ret;
 }

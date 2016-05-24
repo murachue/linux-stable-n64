@@ -2495,7 +2495,7 @@ config FB_SM712
 
 config FB_NINTENDO64_VI
 	tristate "Nintendo 64 VI support"
-	depends on FB && MIPS && OF
+	depends on FB && MIPS
 # We use SYS_* instead of CFB_* because frame buffer is on SystemRAM(RDRAM) and sys_* is (maybe) faster.
 	select FB_SYS_FILLRECT
 	select FB_SYS_COPYAREA
