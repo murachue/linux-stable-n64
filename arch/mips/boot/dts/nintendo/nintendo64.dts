@@ -9,7 +9,7 @@
 	model = "Nintendo 64 8MiB memory";
 
 	chosen {
-		bootargs = "console=console";
+		bootargs = "keep_bootcon verbose";
 	};
 
 	cpus {
