@@ -16,9 +16,11 @@
 #include <asm/addrspace.h> // CPHYSADDR
 
 #define DEVICE_NAME "n64cart"
+/* TODO use probe.arg0 platform_device->resource IORESOURCE_MEM (platform_get_resource IORESOURCE_MEM) */
 #define PI_PHYSBASE 0x04600000
 #define PI_SIZE 0x34
-#define PI_IRQ (8+5) /* PI intr at MI_INTR_REG[4] */
+/* TODO use probe.arg0 platform_device->resource IORESOURCE_IRQ (platform_get_irq for with setting trigger) */
+#define PI_IRQ (8+4) /* PI intr at MI_INTR_REG[4] */
 
 /* redundant. should not be required? */
 static struct platform_driver n64cart_driver = {
@@ -65,8 +67,6 @@ static void read_intr(void)
 	       hd_req->rq_disk->disk_name, blk_rq_pos(hd_req),
 	       blk_rq_sectors(hd_req), bio_data(hd_req->bio));
 #endif
-	/* acking for PI */
-	__raw_writel(2, membase + 0x10); // PI_STATUS
 
 	/* acking all blocks for kernel */
 	/* note: I am called from hd_interrupt, it locks queue. __blk_end_request requires that. */
@@ -96,10 +96,12 @@ static void hd_request(void)
 	unsigned int block, nsect;
 	struct request *req;
 
+	/* do_hd != NULL means waiting read done interrupt, so block-queue issued too fast. */
 	if (do_hd)
 		return;
 
 repeat:
+	/* hd_req != NULL means about to read something. */
 	if (!hd_req) {
 		hd_req = blk_fetch_request(hd_queue);
 		if (!hd_req) {
@@ -172,6 +174,9 @@ static irqreturn_t hd_interrupt(int irq, void *dev_id)
 		handler = unexpected_hd_intr;
 	handler();
 
+	/* whatever (even unexpected), acking for PI */
+	__raw_writel(2, membase + 0x10); // PI_STATUS, [1]=clear_intr
+
 	spin_unlock(hd_queue->queue_lock);
 
 	return IRQ_HANDLED;
@@ -226,12 +231,6 @@ static int __init n64cart_init(void)
 	disk->private_data = NULL;
 	add_disk(disk); /* no error on add_disk, that is void... */
 
-	error = request_irq(PI_IRQ, hd_interrupt, 0, DEVICE_NAME, NULL);
-	if (error) {
-		pr_err("%s:%u: unable to get IRQ%d for the Nintendo 64 cartridge driver\n", __func__, __LINE__, PI_IRQ);
-		goto out_reqirq;
-	}
-
 	if (!request_mem_region(PI_PHYSBASE, PI_SIZE/*bytes*/, DEVICE_NAME)) {
 		pr_err("%s:%u: IOMEM 0x%x busy\n", __func__, __LINE__, PI_PHYSBASE);
 		error = -ENOMEM;
@@ -245,6 +244,16 @@ static int __init n64cart_init(void)
 		goto out_ioremap;
 	}
 
+	/* ack before requesting IRQ, to avoid spurious intr at start. */
+	/* (it may be 1 because PI used by boot-loader.) */
+	__raw_writel(2, membase + 0x10); // PI_STATUS, [1]=clear_intr
+
+	error = request_irq(PI_IRQ, hd_interrupt, 0, DEVICE_NAME, NULL);
+	if (error) {
+		pr_err("%s:%u: unable to get IRQ%d for the Nintendo 64 cartridge driver\n", __func__, __LINE__, PI_IRQ);
+		goto out_reqirq;
+	}
+
 	error = platform_driver_register(&n64cart_driver);
 	if (error) {
 		pr_err("%s:%u: could not register platform driver\n", __func__, __LINE__);
@@ -253,12 +262,12 @@ static int __init n64cart_init(void)
 
 	return 0;
 out_drvreg:
+	free_irq(PI_IRQ, NULL);
+out_reqirq:
 	iounmap(membase);
 out_ioremap:
 	release_mem_region(PI_PHYSBASE, PI_SIZE);
 out_reqiomem:
-	free_irq(PI_IRQ, NULL);
-out_reqirq:
 	put_disk(disk);
 	blk_cleanup_queue(hd_queue);
 out_queue:
