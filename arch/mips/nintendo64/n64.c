@@ -32,19 +32,19 @@ static void __iomem *mi_membase;
 
 static void mi_irq_unmask(struct irq_data *d)
 {
-	__raw_writel(BIT(d->hwirq * 2 + 1), mi_membase + 0x0C); // MI_INTR_MASK_REG
+	__raw_writel(BIT(d->hwirq * 2 + 1), mi_membase + 0x0C); // MI_INTR_MASK_REG, set
 }
 
 static void mi_irq_mask(struct irq_data *d)
 {
-	__raw_writel(BIT(d->hwirq * 2 + 0), mi_membase + 0x0C); // MI_INTR_MASK_REG
+	__raw_writel(BIT(d->hwirq * 2 + 0), mi_membase + 0x0C); // MI_INTR_MASK_REG, clear
 }
 
 static struct irq_chip mi_irq_chip = {
 	.name		= "n64_mi",
 	.irq_unmask	= mi_irq_unmask,
 	.irq_mask	= mi_irq_mask,
-	.irq_mask_ack	= mi_irq_mask, /* TODO mmm, each device has clear intr ... */
+	.irq_mask_ack	= mi_irq_mask, /* maybe fastpath. if null, irq_mask(mandatory) and irq_ack(optional) are used */
 };
 
 static int mi_intc_map(struct irq_domain *d, unsigned int irq, irq_hw_number_t hw)
@@ -63,9 +63,14 @@ static const struct irq_domain_ops irq_domain_ops = {
 #endif
 };
 
+/* TODO this assumes level-trigger, because this routine does one IRQ at a time.
+ * If Nintendo64 MI or MIPS intr does not, enclose with a (possibly while?) loop.
+ * On that case, take care of infinite-loop case. (on some driver does not ack intr.) */
 static void mi_irq_handler(struct irq_desc *desc)
 {
+	/* note: at least on Project64, MI_INTR_REG does not masked with MI_INTR_MASK_REG, but we only care unmasked. */
 	u32 pending = __raw_readl(mi_membase + 0x08); // MI_INTR_REG
+	pending &= __raw_readl(mi_membase + 0x0C); // MI_INTR_MASK_REG
 
 	if (pending) {
 		struct irq_domain *domain = irq_desc_get_handler_data(desc);
@@ -92,7 +97,7 @@ static int __init nintendo_mi_init(struct device_node *of_node, struct resource 
 	/* disable all interrupts */
 	__raw_writel(0x555, mi_membase + 0x0C); // MI_INTR_MASK_REG
 
-	domain = irq_domain_add_legacy(of_node, 6/*count*/, 8/*base*/, 0, &irq_domain_ops, NULL);
+	domain = irq_domain_add_legacy(of_node, 6/*count*/, 8/*base*/, 0/*hwbase*/, &irq_domain_ops, NULL);
 	if (!domain) {
 		pr_err("n64: Failed to add irqdomain MI intrs");
 		goto out_irqdom;
@@ -392,6 +397,7 @@ int __init n64_register_devices(void)
 	}
 	return 0;
 }
+/* TODO umm... someone prepares arch-depends-device-init function? */
 arch_initcall(n64_register_devices);
 
 #ifdef CONFIG_EARLY_PRINTK
