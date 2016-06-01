@@ -35,5 +35,12 @@ config SND_AU1X00
 	  Newer drivers for ASoC are available, please do not use
 	  this driver as it will be removed in the future.
 
+config SND_NINTENDO64_AI
+	tristate "Nintendo 64 AI"
+	depends on NINTENDO64
+	help
+	  Sound support for the Nintendo 64 AI(Audio Interface).
+	  This only supports PCM playing, not ADPCM etc.
+
 endif	# SND_MIPS
 
