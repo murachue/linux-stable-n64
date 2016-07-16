@@ -63,21 +63,19 @@ static void unexpected_hd_intr(void)
 static void read_intr(void)
 {
 #ifdef DEBUG
-	pr_debug("%s: read: pos=%ld, nsect=%u, buffer=%p\n",
-	       hd_req->rq_disk->disk_name, blk_rq_pos(hd_req),
+	pr_info("%s: read: req=%p, pos=%ld, nsect=%u, buffer=%p\n",
+	       hd_req->rq_disk->disk_name, hd_req, blk_rq_pos(hd_req),
 	       blk_rq_sectors(hd_req), bio_data(hd_req->bio));
 #endif
 
-	/* acking all blocks for kernel */
+	/* acking issued blocks for kernel */
 	/* note: I am called from hd_interrupt, it locks queue. __blk_end_request requires that. */
-	if (__blk_end_request(hd_req, 0, blk_rq_cur_bytes(hd_req))) {
-		pr_warn("%s:%d: %s read remains?? pos=%ld nsect=%u\n", __func__, __LINE__, hd_req->rq_disk->disk_name, blk_rq_pos(hd_req), blk_rq_sectors(hd_req));
-		SET_HANDLER(&read_intr);
-		return;
+	if (__blk_end_request(hd_req, 0, blk_rq_cur_bytes(hd_req)) == false) {
+		/* completed whole request. make see next req. */
+		hd_req = NULL;
 	}
-	hd_req = NULL;
 
-	/* do next (potentially) enqueued request */
+	/* do next bio or enqueued request */
 	hd_request();
 }
 
@@ -101,7 +99,7 @@ static void hd_request(void)
 		return;
 
 repeat:
-	/* hd_req != NULL means about to read something. */
+	/* hd_req != NULL means we are processing a request partially. */
 	if (!hd_req) {
 		hd_req = blk_fetch_request(hd_queue);
 		if (!hd_req) {
@@ -121,10 +119,10 @@ repeat:
 	}
 
 #ifdef DEBUG
-	pr_debug("%s: %sing: block=%d, sectors=%d, buffer=%p\n",
+	pr_info("%s: %sing: req=%p, block=%d, sectors=%d, buffer=%p\n",
 		req->rq_disk->disk_name,
-		req_data_dir(req) == READ ? "read" : "writ",
-		block, nsect, bio_data(req->bio));
+		rq_data_dir(req) == READ ? "read" : "writ",
+		req, block, nsect, bio_data(req->bio));
 #endif
 	if (req->cmd_type == REQ_TYPE_FS) {
 		switch (rq_data_dir(req)) {
@@ -169,13 +167,17 @@ static irqreturn_t hd_interrupt(int irq, void *dev_id)
 
 	spin_lock(hd_queue->queue_lock);
 
+	/*
+	 * whatever (even unexpected), acking for PI.
+	 * MUST DO THIS BEFORE EXECUTING HANDLER, because handler may issue another request.
+	 * if do after that, this acks wrong (next) request, cause infinite wait for next request.
+	 */
+	__raw_writel(2, membase + 0x10); // PI_STATUS, [1]=clear_intr
+
 	do_hd = NULL;
 	if (!handler)
 		handler = unexpected_hd_intr;
 	handler();
-
-	/* whatever (even unexpected), acking for PI */
-	__raw_writel(2, membase + 0x10); // PI_STATUS, [1]=clear_intr
 
 	spin_unlock(hd_queue->queue_lock);
 
