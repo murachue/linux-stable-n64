@@ -38,7 +38,7 @@
 
 #include <linux/serial_core.h>
 
-#define ED64_POLL_DELAY (30 * HZ / 1000) // 30ms... NOTE HZ<34 is dangerous
+#define ED64_POLL_DELAY (HZ * 100 / 1000) // 100ms
 
 static struct uart_port port;
 static int enabled;
@@ -170,12 +170,11 @@ static void ed64_break_ctl(struct uart_port *port, int break_state)
  *
  * This function writes all the data from the uart buffer to
  * the ed64 fifo.
+ * Do not use PI DMA for spurious interrupt on n64cart driver.
  */
 static void ed64_write(struct uart_port *port)
 {
-	int count;
 	struct circ_buf *xmit = &port->state->xmit;
-	char *pbuf = (char*)((uintptr_t)port->private_data | 0xA0000000); // uncached
 
 	// TODO support software flow control?
 	/*
@@ -194,41 +193,55 @@ static void ed64_write(struct uart_port *port)
 
 	// TODO avoid reentrant with ed64_read??
 
-	count = port->fifosize;
-	*pbuf++ = count & 0xFF;
-	do {
-		*pbuf++ = xmit->buf[xmit->tail];
-		xmit->tail = (xmit->tail + 1) & (UART_XMIT_SIZE - 1);
-		port->icount.tx++;
-		if(uart_circ_empty(xmit))
-			break;
-	} while(--count > 0);
-
 	{
 		unsigned long flags;
 		local_irq_save(flags); // disable int to avoid clashing with n64cart... XXX
 
 		// TODO PI arbitrator... do not directly access to MMIO here...
 
-		// wait for PI dma done
-		while(__raw_readl((__iomem void *)0xA4600010) & 1) { udelay(1); }
-		// transfer dram2cart
-		__raw_writel((unsigned)port->private_data, (__iomem void *)0xA4600000); // dramaddr
-		__raw_writel(0xB0000000 + 0x04000000 - 0x0800, (__iomem void *)0xA4600004); // cartaddr
-		__raw_writel(0x0200, (__iomem void *)0xA4600008); // dram2cart
-		// wait for PI dma done
-		while(__raw_readl((__iomem void *)0xA4600010) & 1) { udelay(1); }
+		// wait for PI dma done (maybe conflict with CPU R/W)
+		while(__raw_readl((__iomem void *)0xA4600010) & 3) { udelay(1); } // XXX argh!! touching non-requested iomem!!
+
+		ed64_enable(port);
+
 		// wait ED64 dma
 		while(ed64_regread(port, 0x04) & 1) { udelay(1); }
+
+		// write into cart
+		{
+			unsigned int _count = uart_circ_chars_pending(xmit);
+			unsigned int count = (_count < port->fifosize) ? _count : port->fifosize; // min(count, port->fifosize)
+			unsigned int buf = count & 0xFF; // pre-filled by length field
+			int i = 1; // 1 byte already filled
+			while(i < 1 + port->fifosize) {
+				buf <<= 8;
+				if(!uart_circ_empty(xmit)) {
+					buf |= (unsigned char)xmit->buf[xmit->tail];
+					xmit->tail = (xmit->tail + 1) & (UART_XMIT_SIZE - 1);
+					port->icount.tx++;
+				}
+				i++;
+				if(i % 4 == 0) {
+					ed64_dummyread(port); // dummy read required!!
+					__raw_writel(buf, (__iomem unsigned *)(0xB4000000 - 0x0800 + i - 4)); // XXX argh!! touching non-requested iomem!!
+					buf = 0;
+					if(uart_circ_empty(xmit)) {
+						break;
+					}
+				}
+			}
+		}
+
 		// transfer cart2usb
 		// TODO txe# should be tested
 		ed64_regwrite(0, port, 0x08); // dmalen in 512bytes - 1
 		ed64_regwrite((0x04000000-0x0800)/0x800, port, 0x0c); // dmaaddr in 2048bytes
 		ed64_regwrite(4, port, 0x14); // dmacfg = 4(ram2fifo)
+
 		// wait ED64 dma
 		while(ed64_regread(port, 0x04) & 1) { udelay(1); }
 
-		// TODO spurious interrupt on n64cart?
+		ed64_disable(port);
 
 		local_irq_restore(flags);
 	}
@@ -252,69 +265,98 @@ static void ed64_read(struct uart_port *port)
 	struct tty_port *tport = &port->state->port;
 	int data;
 	__u32 start_count = port->icount.rx;
+	unsigned char *rbuf = (unsigned char *)port->private_data;
 
 	// TODO avoid reentrant with ed64_write??
 
 	while(1) {
-		unsigned int count;
-		const unsigned char *pbuf = (const unsigned char*)((uintptr_t)port->private_data | 0xA0000000); // uncached
-
-		// if rxf# is high (=no rx), break.
-		if(ed64_regread(port, 0x04) & 8)
-			break;
-
 		{
 			unsigned long flags;
 			local_irq_save(flags); // disable int to avoid clashing with n64cart... XXX
 
 			// TODO PI arbitrator... do not directly access to MMIO here...
-			// TODO should 512-bytes block read, and timeout handling.
+			// TODO should timeout handling.
+
+			// wait for PI dma done (maybe conflict with CPU R/W)
+			while(__raw_readl((__iomem void *)0xA4600010) & 3) { udelay(1); } // XXX argh!! touching non-requested iomem!!
+
+			ed64_enable(port);
+
+			// if rxf# is high (=no rx), break.
+			if(ed64_regread(port, 0x04) & 8) {
+				ed64_disable(port);
+				local_irq_restore(flags);
+				break;
+			}
 
 			// wait ED64 dma
 			while(ed64_regread(port, 0x04) & 1) { udelay(1); }
+
 			// transfer usb2cart
-			// TODO txe# should be tested
+			// TODO timeout should be handled
 			ed64_regwrite(0, port, 0x08); // dmalen in 512bytes - 1
 			ed64_regwrite((0x04000000-0x0800)/0x800, port, 0x0c); // dmaaddr in 2048bytes
 			ed64_regwrite(3, port, 0x14); // dmacfg = 3(fifo2ram)
+
 			// wait ED64 dma
 			while(ed64_regread(port, 0x04) & 1) { udelay(1); }
-			// wait for PI dma done
-			while(__raw_readl((__iomem void *)0xA4600010) & 1) { udelay(1); }
-			// transfer cart2dram
-			__raw_writel((unsigned)port->private_data, (__iomem void *)0xA4600000); // dramaddr
-			__raw_writel(0xB0000000 + 0x04000000 - 0x0800, (__iomem void *)0xA4600004); // cartaddr
-			__raw_writel(0x0200, (__iomem void *)0xA460000C); // cart2dram
-			// wait for PI dma done
-			while(__raw_readl((__iomem void *)0xA4600010) & 1) { udelay(1); }
 
-			// TODO spurious interrupt on n64cart?
+			// here, ed64_disable can be called... but later.
+
+			// transfer cart2dram
+			// Must be transferred to memory... to process rx data in interruptible context,
+			// that don't be bothered with other PI access (or tty processing).
+			// NOTE can't use PI DMA... spurious interrupt on n64cart.
+			{
+				unsigned int i;
+				for(i = 0; i < 256; i += 4) {
+					*((unsigned int *)(rbuf + i)) = __raw_readl((__iomem void *)(0xB4000000 - 0x0800 + i)); // XXX argh!! touching non-requested iomem!!
+				}
+			}
+
+			ed64_disable(port);
 
 			local_irq_restore(flags);
 		}
 
-		count = *pbuf++;
-		if(port->fifosize < count) {
-			count = port->fifosize;
-		}
+		pr_info("ed64: got rx: %02x%02x %02x%02x %02x%02x %02x%02x\n"
+				,rbuf[0]
+				,rbuf[1]
+				,rbuf[2]
+				,rbuf[3]
+				,rbuf[4]
+				,rbuf[5]
+				,rbuf[6]
+				,rbuf[7]
+				);
 
-		while(count--) {
-			data = *pbuf++;
-			port->icount.rx++;
+		{
+			unsigned int count;
+			const unsigned char *pbuf = (const unsigned char*)rbuf;
 
-			// TODO break support
+			count = *pbuf++;
 			/*
-			 if (ed64_BREAK(data)) {
-			 port->icount.brk++;
-			 if(uart_handle_break(port))
-			 continue;
-			 }
+			if(port->fifosize < count) {
+				count = port->fifosize;
+			}
 			*/
 
-			if (uart_handle_sysrq_char(port, data & 0xffu))
-				continue;
+			if(count == 0) {
+				pr_info("ed64: got break\n");
+				port->icount.brk++;
+				uart_handle_break(port); // note: return 1 if sysrq prefix
+			} else {
+				pr_info("ed64: got %d chars\n", count);
+				do {
+					data = *pbuf++;
+					port->icount.rx++;
 
-			tty_insert_flip_char(tport, data & 0xFF, TTY_NORMAL);
+					if (uart_handle_sysrq_char(port, data & 0xffu))
+						continue;
+
+					tty_insert_flip_char(tport, data & 0xFF, TTY_NORMAL);
+				} while(--count);
+			}
 		}
 	}
 
@@ -437,10 +479,8 @@ static int ed64_verify_port(struct uart_port *port, struct serial_struct *ser)
 static void ed64_poll(unsigned long unused)
 {
 	if(enabled) {
-		ed64_enable(&port);
 		ed64_read(&port);
 		ed64_write(&port);
-		ed64_disable(&port);
 	}
 
 	// schedule next polling
@@ -458,8 +498,8 @@ static void ed64_console_write(struct console *co, const char *_s, unsigned coun
 
 	// TODO PI arbitrator... do not directly access to MMIO here...
 
-	// wait for PI dma done
-	while(__raw_readl((__iomem void *)0xA4600010) & 1) { udelay(1); }
+	// wait for PI dma done (maybe conflict with CPU R/W)
+	while(__raw_readl((__iomem void *)0xA4600010) & 3) { udelay(1); } // XXX argh!! touching non-requested iomem!!
 
 	ed64_enable(&port);
 
@@ -480,7 +520,7 @@ static void ed64_console_write(struct console *co, const char *_s, unsigned coun
 			i++;
 			if(i % 4 == 0) {
 				ed64_dummyread(&port); // dummy read required!!
-				__raw_writel(buf, (__iomem unsigned *)(0xB4000000 - 0x0800 + i - 4));
+				__raw_writel(buf, (__iomem unsigned *)(0xB4000000 - 0x0800 + i - 4)); // XXX argh!! touching non-requested iomem!!
 				buf = 0;
 				if(cnt == 0) {
 					break;
@@ -500,8 +540,6 @@ static void ed64_console_write(struct console *co, const char *_s, unsigned coun
 	}
 
 	ed64_disable(&port);
-
-	// TODO spurious interrupt on n64cart?
 
 	local_irq_restore(flags);
 }
@@ -582,7 +620,7 @@ static int __init ed64_init(void)
 	port.ops = &ed64_pops;
 	port.flags = UPF_BOOT_AUTOCONF;
 	port.line = 0; // port 0
-	port.private_data = kmalloc(256+8, GFP_KERNEL); // TODO 8byte align required
+	port.private_data = kmalloc(256, GFP_KERNEL); // XXX 4 bytes aligned
 
 	/* The port->timeout needs to match what is present in
 	 * uart_wait_until_sent in serial_core.c.  Otherwise
