@@ -28,18 +28,18 @@
 
 static struct fb_fix_screeninfo n64vifb_fix = {
 	.id          = "N64VIFB",
-	.smem_len    = 640*480*2,
+	.smem_len    = 320*240*2,
 	.type        = FB_TYPE_PACKED_PIXELS,
 	.visual      = FB_VISUAL_TRUECOLOR,
-	.line_length = 640*2,
+	.line_length = 320*2,
 	.accel       = FB_ACCEL_NONE,
 };
 
 static struct fb_var_screeninfo n64vifb_var = {
-	.xres           = 640,
-	.yres           = 480,
-	.xres_virtual   = 640,
-	.yres_virtual   = 480,
+	.xres           = 320,
+	.yres           = 240,
+	.xres_virtual   = 320,
+	.yres_virtual   = 240,
 	.bits_per_pixel = 16,
 	.red            = {6, 5, 0},
 	.green          = {11, 5, 0},
@@ -104,7 +104,7 @@ static int n64vifb_init_device(struct resource *reses)
 	/* TODO should save "reg" here */
 
 	// dma_alloc_writecombine...? dma_alloc_coherent...? __get_free_pages(GFP_KERNEL|__GFP_ZERO,get_order(vmem_size))???
-	// We need physically contiguous memory, so can't use vmalloc family.
+	// We need physically contiguous memory, so we can't use vmalloc family.
 	fb_start_vm = kzalloc(n64vifb_fix.smem_len, GFP_KERNEL);
 	if (!fb_start_vm) {
 		pr_err("n64vifb: could not allocate frame buffer memory\n");
@@ -115,10 +115,10 @@ static int n64vifb_init_device(struct resource *reses)
 	/* XXX DEBUG */
 	{
 		int y;
-		for(y = 0; y < 480; y++) {
+		for(y = 0; y < 320; y++) {
 			int x;
-			for(x = 0; x < 640; x++) {
-				*((u16*)fb_start_vm + (y*640+x)) = 0xFFff;
+			for(x = 0; x < 240; x++) {
+				*((u16*)fb_start_vm + (y*320+x)) = 0xFFff;
 			}
 		}
 	}
@@ -150,6 +150,7 @@ static int n64vifb_init_device(struct resource *reses)
 		goto out_fballoc;
 	}
 
+#if 0
 	/* initialize VI as 640x480 NTSC. from libdragon. */
 	__raw_writel(0x0001015e, &reg[0]); // VI_CONTROL_REG: 16bit, gamma, gamma_dither, divot, aa_resamp_fetch_if_needed. 0x10000??
 	__raw_writel((u32)n64vifb_fix.smem_start & 0x007Fffff, &reg[1]); // VI_DRAM_ADDR (phys-addr)
@@ -165,6 +166,23 @@ static int n64vifb_init_device(struct resource *reses)
 	__raw_writel(0x000e0204, &reg[11]); // VI_V_BURST_REG  14..516
 	__raw_writel(0x00000400, &reg[12]); // VI_X_SCALE_REG subpx_off=0.0(2.10f) scaleup=1/1.0(2.10f)
 	__raw_writel(0x02000800, &reg[13]); // VI_Y_SCALE_REG subpx_off=0.5(2.10f) scaleup=1/2.0(2.10f)
+#else
+	/* initialize VI as 320x240 NTSC. from libdragon. */
+	__raw_writel(0x0001015e, &reg[0]); // VI_CONTROL_REG: 16bit, gamma, gamma_dither, divot, aa_resamp_fetch_if_needed. 0x10000??
+	__raw_writel((u32)n64vifb_fix.smem_start & 0x007Fffff, &reg[1]); // VI_DRAM_ADDR (phys-addr)
+	__raw_writel(0x00000140, &reg[2]); // VI_WIDTH_REG (0d320=0x140)
+	//__raw_writel(0x00000200, &reg[3]); // VI_INTR_REG
+	//__raw_writel(0x00000000, &reg[4]); // VI_CURRENT_REG // writing clears VI intr.
+	__raw_writel(0x03e52239, &reg[5]); // VI_BURST(TIMING?)_REG
+	__raw_writel(0x0000020d, &reg[6]); // VI_V_SYNC_REG (0d525=0x20d)
+	__raw_writel(0x00000c15, &reg[7]); // VI_H_SYNC_REG
+	__raw_writel(0x0c150c15, &reg[8]); // VI_LEAP_REG(H_SYNC_LEAP?)
+	__raw_writel(0x006c02ec, &reg[9]); // VI_H_START_REG 108..748
+	__raw_writel(0x002501ff, &reg[10]); // VI_V_START_REG  37..511
+	__raw_writel(0x000e0204, &reg[11]); // VI_V_BURST_REG  14..516
+	__raw_writel(0x00000200, &reg[12]); // VI_X_SCALE_REG subpx_off=0.0(2.10f) scaleup=1/0.5(2.10f)
+	__raw_writel(0x00000400, &reg[13]); // VI_Y_SCALE_REG subpx_off=0.0(2.10f) scaleup=1/1.0(2.10f)
+#endif
 
 	info->var = n64vifb_var; /* copy whole struct */
 	info->fix = n64vifb_fix;
