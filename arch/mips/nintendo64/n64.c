@@ -405,12 +405,65 @@ arch_initcall(n64_register_devices);
 //static __iomem void *uart_membase = (__iomem void *) KSEG1ADDR(EARLY_UART_BASE);
 void prom_putchar(unsigned char ch)
 {
-	/*
+#if 0
 	__raw_writeb(ch, uart_membase);
 	uart_membase++;
-	/*/
+#elif 0
 	__raw_writel(ch, (__iomem void *)KSEG1ADDR(0x04400038));
-	//*/
+#elif 1
+	unsigned long flags;
+	local_irq_save(flags);
+
+	__raw_readl((__iomem void *)KSEG1ADDR(0x08040000));
+	__raw_writel(0x1234, (__iomem void *)KSEG1ADDR(0x08040020));
+
+	// wait for ED64dma, busyloop...
+	for(;;) {
+		__raw_readl((__iomem void *)KSEG1ADDR(0x08040000));
+		if((__raw_readl((__iomem void *)KSEG1ADDR(0x08040004)) & 1) == 0) {
+			break;
+		}
+	}
+
+	// write buffer
+	// NOTE a bit lower address for avoid clash with ed64 serial
+	__raw_readl((__iomem void *)KSEG1ADDR(0x08040000));
+	__raw_writel(0x01000000 | ((unsigned)ch << 16), (__iomem void *)KSEG1ADDR(0x13FFF000));
+#if 0
+	// wipe rest... should be done first time only
+	{
+		static int wiped = 0;
+		if(!wiped) {
+			__iomem unsigned long *p;
+			for(p = (__iomem unsigned long *)KSEG1ADDR(0x13FFf004); p < (__iomem unsigned long *)KSEG1ADDR(0x13FFf800); p++) {
+				__raw_readl((__iomem void *)KSEG1ADDR(0x08040000));
+				__raw_writel(0, p);
+			}
+			wiped = 1;
+		}
+	}
+#endif
+
+	__raw_readl((__iomem void *)KSEG1ADDR(0x08040000));
+	__raw_writel(0x03FFf000/0x800, (__iomem void *)KSEG1ADDR(0x0804000C));
+	__raw_readl((__iomem void *)KSEG1ADDR(0x08040000));
+	__raw_writel(0x0200/0x200-1, (__iomem void *)KSEG1ADDR(0x08040008));
+	__raw_readl((__iomem void *)KSEG1ADDR(0x08040000));
+	__raw_writel(4, (__iomem void *)KSEG1ADDR(0x08040014));
+
+	// wait for ED64dma, busyloop...
+	for(;;) {
+		__raw_readl((__iomem void *)KSEG1ADDR(0x08040000));
+		if((__raw_readl((__iomem void *)KSEG1ADDR(0x08040004)) & 1) == 0) {
+			break;
+		}
+	}
+
+	__raw_readl((__iomem void *)KSEG1ADDR(0x08040000));
+	__raw_writel(0, (__iomem void *)KSEG1ADDR(0x08040020));
+
+	local_irq_restore(flags);
+#endif
 }
 #endif
 
