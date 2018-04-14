@@ -16,7 +16,8 @@ static inline void __noreturn BUG(void)
 
 #define HAVE_ARCH_BUG
 
-#if (_MIPS_ISA > _MIPS_ISA_MIPS1 && !CONFIG_NINTENDO64_EMUHACK)
+#if (_MIPS_ISA > _MIPS_ISA_MIPS1 && !defined(CONFIG_NINTENDO64_EMUHACK))
+/* EMUHACK: At least Project64 and cen64 do not support trap instructions. */
 
 static inline void  __BUG_ON(unsigned long condition)
 {
