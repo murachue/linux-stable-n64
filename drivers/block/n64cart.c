@@ -227,7 +227,7 @@ static int __init n64cart_init(void)
 	disk->major = n64cart_major;
 	disk->first_minor = 0;
 	sprintf(disk->disk_name, "cart%c", '0');
-	set_capacity(disk, 4*1024*1024/512); /* FIXME be configurable */
+	set_capacity(disk, 48*1024*1024/512); /* FIXME be configurable */
 	disk->fops = &hd_fops;
 	disk->queue = hd_queue;
 	disk->private_data = NULL;
