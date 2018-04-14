@@ -1,3 +1,4 @@
+//#define DEBUG
 
 /* large parts from drivers/block/hd.c */
 /* TODO rename "hd" */
@@ -14,6 +15,8 @@
 #include <linux/hdreg.h> // struct hd_geometry
 #include <linux/interrupt.h>
 #include <asm/addrspace.h> // CPHYSADDR
+
+#include <linux/crc32.h> // DEBUG
 
 #define DEVICE_NAME "n64cart"
 /* TODO use probe.arg0 platform_device->resource IORESOURCE_MEM (platform_get_resource IORESOURCE_MEM) */
@@ -62,17 +65,30 @@ static void unexpected_hd_intr(void)
 
 static void read_intr(void)
 {
+	u32 status;
+
+	/* check PI DMA error and retry if error. */
+	status = __raw_readl(membase + 0x10);
+
 #ifdef DEBUG
+	// note: debug print AFTER reading status is important for ed64 console!
 	pr_info("%s: read: req=%p, pos=%ld, nsect=%u, buffer=%p\n",
 	       hd_req->rq_disk->disk_name, hd_req, blk_rq_pos(hd_req),
 	       blk_rq_sectors(hd_req), bio_data(hd_req->bio));
 #endif
 
-	/* acking issued blocks for kernel */
-	/* note: I am called from hd_interrupt, it locks queue. __blk_end_request requires that. */
-	if (__blk_end_request(hd_req, 0, blk_rq_cur_bytes(hd_req)) == false) {
-		/* completed whole request. make see next req. */
-		hd_req = NULL;
+	if((status & 7) != 0) {
+		pr_err("%s: PI read error status=%u for %ld+%u\n", hd_req->rq_disk->disk_name, status, blk_rq_pos(hd_req), blk_rq_sectors(hd_req));
+		__raw_writel(3, membase + 0x10); // PI_STATUS = RESET|CLEARINTR
+	} else {
+pr_info("%s: read: %ld+%u=>%08x\n", hd_req->rq_disk->disk_name, blk_rq_pos(hd_req), blk_rq_sectors(hd_req), crc32_be(0, (void*)((unsigned int)bio_data(hd_req->bio) | 0xA0000000), blk_rq_sectors(hd_req) * 512));
+{int s=blk_rq_sectors(hd_req) * 512;unsigned char *p=(void*)((unsigned int)bio_data(hd_req->bio) | 0xA0000000),q[64*2+1],*r=q;while(s--){sprintf(r,"%02X",*p++);r+=2;if(s%64==0){pr_info("%s\n",q);r=q;}}}
+		/* acking issued blocks for kernel */
+		/* note: I am called from hd_interrupt, it locks queue. __blk_end_request requires that. */
+		if (__blk_end_request(hd_req, 0, blk_rq_cur_bytes(hd_req)) == false) {
+			/* completed whole request. make see next req. */
+			hd_req = NULL;
+		}
 	}
 
 	/* do next bio or enqueued request */
@@ -127,13 +143,22 @@ repeat:
 	if (req->cmd_type == REQ_TYPE_FS) {
 		switch (rq_data_dir(req)) {
 		case READ:
-			{
-				u32 status = __raw_readl(membase + 0x00);
+			/*
+			for(;;){
+				u32 status = __raw_readl(membase + 0x10);
 				if((status & 7) != 0) {
 					pr_err("%s: PI busy status=%u\n", req->rq_disk->disk_name, status);
+					__raw_writel(3, membase + 0x10); // PI_STATUS = RESET|CLEARINTR
+				} else {
+					break;
 				}
 			}
+			*/
 			SET_HANDLER(read_intr);
+			if(((unsigned int)(bio_data(req->bio)) & 7) != 0) {
+				pr_err("%s: buffer not aligned 8bytes: %p\n", req->rq_disk->disk_name, bio_data(req->bio));
+			}
+			__raw_writel(3, membase + 0x10); // PI_STATUS = RESET|CLEARINTR
 			/* TODO is CPHYSADDR correct?? no other virt2phys like func? */
 			__raw_writel(CPHYSADDR(bio_data(req->bio)), membase + 0x00); // PI_DRAM_ADDR
 			__raw_writel(0x10000000 + block * 512, membase + 0x04); // PI_CART_ADDR
