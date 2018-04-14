@@ -25,6 +25,7 @@
 #define MISC_MAJOR		10
 #define SCSI_CDROM_MAJOR	11
 #define MUX_MAJOR		11	/* PA-RISC only */
+#define ED64_MAJOR		11	/* MIPS(Nintendo64) only */
 #define XT_DISK_MAJOR		13
 #define INPUT_MAJOR		13
 #define SOUND_MAJOR		14

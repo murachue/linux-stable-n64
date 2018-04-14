@@ -1629,6 +1629,21 @@ config SERIAL_STM32_CONSOLE
 	depends on SERIAL_STM32=y
 	select SERIAL_CORE_CONSOLE
 
+config SERIAL_ED64
+	tristate "EverDrive-64 v3 pseudo serial support"
+	depends on NINTENDO64
+	select SERIAL_CORE
+	default n
+	---help---
+	  Saying Y here will enable the EverDrive-64 v3 pseudo serial driver.
+	  You will need support software on host computer connected by USB.
+
+config SERIAL_ED64_CONSOLE
+	bool "Support for console on ED64 pseudo serial"
+	depends on SERIAL_ED64=y
+	select SERIAL_CORE_CONSOLE
+	default n
+
 endmenu
 
 config SERIAL_MCTRL_GPIO
