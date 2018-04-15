@@ -81,14 +81,62 @@ static void read_intr(void)
 		pr_err("%s: PI read error status=%u for %ld+%u\n", hd_req->rq_disk->disk_name, status, blk_rq_pos(hd_req), blk_rq_sectors(hd_req));
 		__raw_writel(3, membase + 0x10); // PI_STATUS = RESET|CLEARINTR
 	} else {
-pr_info("%s: read: %ld+%u=>%08x\n", hd_req->rq_disk->disk_name, blk_rq_pos(hd_req), blk_rq_sectors(hd_req), crc32_be(0, (void*)((unsigned int)bio_data(hd_req->bio) | 0xA0000000), blk_rq_sectors(hd_req) * 512));
-{int s=blk_rq_sectors(hd_req) * 512;unsigned char *p=(void*)((unsigned int)bio_data(hd_req->bio) | 0xA0000000),q[64*2+1],*r=q;while(s--){sprintf(r,"%02X",*p++);r+=2;if(s%64==0){pr_info("%s\n",q);r=q;}}}
+//pr_info("%s: read: %ld+%u=>%08x\n", hd_req->rq_disk->disk_name, blk_rq_pos(hd_req), blk_rq_sectors(hd_req), crc32_be(0, (void*)((unsigned int)bio_data(hd_req->bio) | 0xA0000000), blk_rq_sectors(hd_req) * 512));
+//{int s=512/*blk_rq_sectors(hd_req) * 512*/;unsigned char *p=(void*)((unsigned int)bio_data(hd_req->bio) | 0xA0000000),q[64*2+1],*r=q;while(s--){sprintf(r,"%02X",*p++);r+=2;if(s%64==0){pr_info("%s\n",q);r=q;}}}
+//{struct request *req=hd_req;void *b=kmalloc(512, GFP_KERNEL | GFP_NOIO);int s=512;unsigned char *p=b,q[64*2+1],*r=q;memcpy(b, (void*)((unsigned int)bio_data(req->bio) | 0xA0000000), 512);while(s--){sprintf(r,"%02X",*p++);r+=2;if(s%64==0){pr_info("%s\n",q);r=q;}};kfree(b);}
+{
+	int size = blk_rq_sectors(hd_req) * 512;
+	int *buf = kmalloc(size, GFP_KERNEL | GFP_NOIO);
+	void *bbuf = (void*)((unsigned int)bio_data(hd_req->bio) | 0xA0000000);
+	__asm("mtc0 %0,$19; mtc0 %1, $18" : : "r"(0), "r"((((unsigned int)bbuf + 0x10) & 0x1FFFfff8) | 1)); // Write watch to bio buf + 0x10 (="/dev/root")
+	memcpy(buf, bbuf, size);
+
+	{
+		int s = 512;
+		char *p = bbuf, q[64*2+1], *r = q;
+		while(s--){
+			sprintf(r, "%02X", *p++);
+			r += 2;
+			if(s % 64 == 0) {
+				pr_info("%s\n",q);
+				r = q;
+			}
+		}
+	}
+	if(memcmp(buf, bbuf, size)) {
+		pr_err("n64cart: memcmp failed\n");
+		{
+			int s = 512;
+			char *p = bbuf, q[64*2+1], *r = q;
+			while(s--){
+				sprintf(r, "%02X", *p++);
+				r += 2;
+				if(s % 64 == 0) {
+					pr_info("%s\n",q);
+					r = q;
+				}
+			}
+		}
+		panic("n64cart bio has broken");
+	}
+}
+
+// SUPER QUICK DIRTY HACK: if cant-mount-root happened, some memory is allocated and freed in bio (!?),
+//                         first word pointing bio+0x10, and pointed area is "/dev/root" \0*5 \x20 \0.
+//                         total 32bytes.
+//                         this QUICK DIRTY HACK uses that pointer characteristic.
+unsigned abio = (unsigned int)bio_data(hd_req->bio);
+unsigned *pd = (unsigned*)(abio | 0xA0000000);
+if(*pd == abio + 0x10) {
+	pr_err("n64cart: fucking\n");
+} else {
 		/* acking issued blocks for kernel */
 		/* note: I am called from hd_interrupt, it locks queue. __blk_end_request requires that. */
 		if (__blk_end_request(hd_req, 0, blk_rq_cur_bytes(hd_req)) == false) {
 			/* completed whole request. make see next req. */
 			hd_req = NULL;
 		}
+}
 	}
 
 	/* do next bio or enqueued request */
@@ -110,7 +158,7 @@ static void hd_request(void)
 	unsigned int block, nsect;
 	struct request *req;
 
-	/* do_hd != NULL means waiting read done interrupt, so block-queue issued too fast. */
+	/* do_hd != NULL means waiting read done interrupt, ex. block-queue issued too fast. */
 	if (do_hd)
 		return;
 
@@ -158,7 +206,9 @@ repeat:
 			if(((unsigned int)(bio_data(req->bio)) & 7) != 0) {
 				pr_err("%s: buffer not aligned 8bytes: %p\n", req->rq_disk->disk_name, bio_data(req->bio));
 			}
+//{void *b=kmalloc(512, GFP_KERNEL | GFP_NOIO);int s=512;unsigned char *p=b,q[64*2+1],*r=q;memcpy(b, (void*)((unsigned int)bio_data(req->bio) | 0xA0000000), 512);while(s--){sprintf(r,"%02X",*p++);r+=2;if(s%64==0){pr_info("%s\n",q);r=q;}};kfree(b);}
 			__raw_writel(3, membase + 0x10); // PI_STATUS = RESET|CLEARINTR
+			flush_cache_all();
 			/* TODO is CPHYSADDR correct?? no other virt2phys like func? */
 			__raw_writel(CPHYSADDR(bio_data(req->bio)), membase + 0x00); // PI_DRAM_ADDR
 			__raw_writel(0x10000000 + block * 512, membase + 0x04); // PI_CART_ADDR
