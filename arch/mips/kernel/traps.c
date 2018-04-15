@@ -1508,7 +1508,7 @@ asmlinkage void do_watch(struct pt_regs *regs)
 {
 	enum ctx_state prev_state;
 	u32 cause;
-die("got watch", regs);
+
 	prev_state = exception_enter();
 	/*
 	 * Clear WP (bit 22) bit of cause register so we don't loop
