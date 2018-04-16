@@ -13,6 +13,8 @@
 **
 */
 
+//#define DEBUG
+
 /* TODO OpenFirmware DeviceTree support? */
 #ifdef CONFIG_USE_OF
 #error ed64 does not support device tree yet
@@ -319,6 +321,7 @@ static void ed64_read(struct uart_port *port)
 			local_irq_restore(flags);
 		}
 
+#ifdef DEBUG
 		pr_info("ed64: got rx: %02x%02x %02x%02x %02x%02x %02x%02x\n"
 				,rbuf[0]
 				,rbuf[1]
@@ -329,6 +332,7 @@ static void ed64_read(struct uart_port *port)
 				,rbuf[6]
 				,rbuf[7]
 				);
+#endif
 
 		{
 			unsigned int count;
@@ -342,11 +346,15 @@ static void ed64_read(struct uart_port *port)
 			*/
 
 			if(count == 0) {
+#ifdef DEBUG
 				pr_info("ed64: got break\n");
+#endif
 				port->icount.brk++;
 				uart_handle_break(port); // note: return 1 if sysrq prefix
 			} else {
+#ifdef DEBUG
 				pr_info("ed64: got %d chars\n", count);
+#endif
 				do {
 					data = *pbuf++;
 					port->icount.rx++;
