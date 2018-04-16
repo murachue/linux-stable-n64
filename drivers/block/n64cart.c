@@ -125,11 +125,11 @@ if(0){
 
 		// verify: QUICK DIRTY HACK.
 		if(debug_head512 == NULL) {
-			debug_head512 = kmalloc(512, GFP_KERNEL | GFP_NOIO);
-			memcpy(debug_head512, bio_data(hd_req->bio), 512);
-		} else if(memcmp(debug_head512, bio_data(hd_req->bio), 512) != 0) {
+			debug_head512 = kmalloc(blk_rq_sectors(hd_req) * 512, GFP_KERNEL | GFP_NOIO);
+			memcpy(debug_head512, bio_data(hd_req->bio), blk_rq_sectors(hd_req) * 512);
+		} else if(memcmp(debug_head512, bio_data(hd_req->bio), blk_rq_sectors(hd_req) * 512) != 0) {
 			pr_err("%s: read %ld(+%u) verify failed; retrying\n", hd_req->rq_disk->disk_name, blk_rq_pos(hd_req), blk_rq_sectors(hd_req));
-			memcpy(debug_head512, bio_data(hd_req->bio), 512);
+			memcpy(debug_head512, bio_data(hd_req->bio), blk_rq_sectors(hd_req) * 512);
 		} else {
 			kfree(debug_head512);
 			debug_head512 = NULL;
