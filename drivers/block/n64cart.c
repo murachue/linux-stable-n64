@@ -83,7 +83,6 @@ static void read_intr(void)
 //pr_info("%s: read: %ld+%u=>%08x\n", hd_req->rq_disk->disk_name, blk_rq_pos(hd_req), blk_rq_sectors(hd_req), crc32_be(0, (void*)((unsigned int)bio_data(hd_req->bio) | 0xA0000000), blk_rq_sectors(hd_req) * 512));
 //{int s=512/*blk_rq_sectors(hd_req) * 512*/;unsigned char *p=(void*)((unsigned int)bio_data(hd_req->bio) | 0xA0000000),q[64*2+1],*r=q;while(s--){sprintf(r,"%02X",*p++);r+=2;if(s%64==0){pr_info("%s\n",q);r=q;}}}
 //{struct request *req=hd_req;void *b=kmalloc(512, GFP_KERNEL | GFP_NOIO);int s=512;unsigned char *p=b,q[64*2+1],*r=q;memcpy(b, (void*)((unsigned int)bio_data(req->bio) | 0xA0000000), 512);while(s--){sprintf(r,"%02X",*p++);r+=2;if(s%64==0){pr_info("%s\n",q);r=q;}};kfree(b);}
-__flush_cache_all();
 if(0){
 	int size = blk_rq_sectors(hd_req) * 512;
 	int *buf = kmalloc(size, GFP_KERNEL | GFP_NOIO);
@@ -127,18 +126,43 @@ if(0){
 		if(debug_head512 == NULL) {
 			debug_head512 = kmalloc(blk_rq_sectors(hd_req) * 512, GFP_KERNEL | GFP_NOIO);
 			memcpy(debug_head512, bio_data(hd_req->bio), blk_rq_sectors(hd_req) * 512);
-		} else if(memcmp(debug_head512, bio_data(hd_req->bio), blk_rq_sectors(hd_req) * 512) != 0) {
-			pr_err("%s: read %ld(+%u) verify failed; retrying\n", hd_req->rq_disk->disk_name, blk_rq_pos(hd_req), blk_rq_sectors(hd_req));
-			memcpy(debug_head512, bio_data(hd_req->bio), blk_rq_sectors(hd_req) * 512);
 		} else {
-			kfree(debug_head512);
-			debug_head512 = NULL;
+			int r;
+			{
+				const unsigned char *p = debug_head512, *q = bio_data(hd_req->bio);
+				int len = blk_rq_sectors(hd_req) * 512;
+				const int atonce = 32;
+				char hexp[atonce*2+1], hexq[atonce*2+1];
+				while(0 < len) {
+					r = memcmp(p, q, atonce);
+					if(r) {
+						int i;
+						for(i = 0; i < atonce; i++) {
+							sprintf(hexp + i * 2, "%02X", p[i]);
+							sprintf(hexq + i * 2, "%02X", q[i]);
+						}
+						pr_err("E+%03x: %s %s\n", (unsigned)p - (unsigned)debug_head512, hexp, hexq);
+						break;
+					}
+					p += atonce;
+					q += atonce;
+					len -= atonce;
+				}
+			}
 
-			/* acking issued blocks for kernel */
-			/* note: I am called from hd_interrupt, it locks queue. __blk_end_request requires that. */
-			if (__blk_end_request(hd_req, 0, blk_rq_cur_bytes(hd_req)) == false) {
-				/* completed whole request. make see next req. */
-				hd_req = NULL;
+			if(r /*memcmp(debug_head512, bio_data(hd_req->bio), blk_rq_sectors(hd_req) * 512) != 0*/) {
+				pr_err("%s: read %ld(+%u) verify failed; retrying\n", hd_req->rq_disk->disk_name, blk_rq_pos(hd_req), blk_rq_sectors(hd_req));
+				memcpy(debug_head512, bio_data(hd_req->bio), blk_rq_sectors(hd_req) * 512);
+			} else {
+				kfree(debug_head512);
+				debug_head512 = NULL;
+
+				/* acking issued blocks for kernel */
+				/* note: I am called from hd_interrupt, it locks queue. __blk_end_request requires that. */
+				if (!__blk_end_request(hd_req, 0, blk_rq_cur_bytes(hd_req))) {
+					/* completed whole request. make see next req. */
+					hd_req = NULL;
+				}
 			}
 		}
 	}
@@ -211,6 +235,7 @@ repeat:
 				pr_err("%s: buffer not aligned 8bytes: %p\n", req->rq_disk->disk_name, bio_data(req->bio));
 			}
 			__raw_writel(3, membase + 0x10); // PI_STATUS = RESET|CLEARINTR
+__flush_cache_all();
 			/* TODO is CPHYSADDR correct?? no other virt2phys like func? */
 			__raw_writel(CPHYSADDR(bio_data(req->bio)), membase + 0x00); // PI_DRAM_ADDR
 			__raw_writel(0x10000000 + block * 512, membase + 0x04); // PI_CART_ADDR
