@@ -50,9 +50,9 @@ static bool hd_end_request(int err, unsigned int bytes)
 	return false;
 }
 
-static bool hd_end_request_cur(int err)
+static bool hd_end_request_entire(int err)
 {
-	return hd_end_request(err, blk_rq_cur_bytes(hd_req));
+	return hd_end_request(err, blk_rq_bytes(hd_req));
 }
 
 static void hd_request (void);
@@ -71,20 +71,20 @@ static void read_intr(void)
 
 #ifdef DEBUG
 	// note: debug print AFTER reading status is important for ed64 console!
-	pr_info("%s: read: req=%p, pos=%ld, nsect=%u, buffer=%p\n",
+	pr_info("%s: read_done: req=%p, disk=%ld+%Xh/%Xh, buffer=%p\n",
 	       hd_req->rq_disk->disk_name, hd_req, blk_rq_pos(hd_req),
-	       blk_rq_sectors(hd_req), bio_data(hd_req->bio));
+	       blk_rq_cur_bytes(hd_req), blk_rq_bytes(hd_req), bio_data(hd_req->bio));
 #endif
 
 	if((status & 7) != 0) {
-		pr_err("%s: PI read error status=%u for %ld+%u\n", hd_req->rq_disk->disk_name, status, blk_rq_pos(hd_req), blk_rq_sectors(hd_req));
+		pr_err("%s: PI read error status=%u for %ld+%Xh; retrying\n", hd_req->rq_disk->disk_name, status, blk_rq_pos(hd_req), blk_rq_cur_bytes(hd_req));
 		__raw_writel(3, membase + 0x10); // PI_STATUS = RESET|CLEARINTR
 	} else {
-//pr_info("%s: read: %ld+%u=>%08x\n", hd_req->rq_disk->disk_name, blk_rq_pos(hd_req), blk_rq_sectors(hd_req), crc32_be(0, (void*)((unsigned int)bio_data(hd_req->bio) | 0xA0000000), blk_rq_sectors(hd_req) * 512));
-//{int s=512/*blk_rq_sectors(hd_req) * 512*/;unsigned char *p=(void*)((unsigned int)bio_data(hd_req->bio) | 0xA0000000),q[64*2+1],*r=q;while(s--){sprintf(r,"%02X",*p++);r+=2;if(s%64==0){pr_info("%s\n",q);r=q;}}}
+//pr_info("%s: read: %ld+%Xh=>%08x\n", hd_req->rq_disk->disk_name, blk_rq_pos(hd_req), blk_rq_cur_bytes(hd_req), crc32_be(0, (void*)((unsigned int)bio_data(hd_req->bio) | 0xA0000000), blk_rq_cur_bytes(hd_req)));
+//{int s=512/*blk_rq_cur_bytes(hd_req)*/;unsigned char *p=(void*)((unsigned int)bio_data(hd_req->bio) | 0xA0000000),q[64*2+1],*r=q;while(s--){sprintf(r,"%02X",*p++);r+=2;if(s%64==0){pr_info("%s\n",q);r=q;}}}
 //{struct request *req=hd_req;void *b=kmalloc(512, GFP_KERNEL | GFP_NOIO);int s=512;unsigned char *p=b,q[64*2+1],*r=q;memcpy(b, (void*)((unsigned int)bio_data(req->bio) | 0xA0000000), 512);while(s--){sprintf(r,"%02X",*p++);r+=2;if(s%64==0){pr_info("%s\n",q);r=q;}};kfree(b);}
 if(0){
-	int size = blk_rq_sectors(hd_req) * 512;
+	int size = blk_rq_cur_bytes(hd_req);
 	int *buf = kmalloc(size, GFP_KERNEL | GFP_NOIO);
 	void *bbuf = (void*)((unsigned int)bio_data(hd_req->bio) | 0xA0000000);
 	//__asm("mtc0 %0,$19; mtc0 %1, $18" : : "r"(0), "r"((((unsigned int)bbuf + 0x10) & 0x1FFFfff8) | 1)); // Write watch to bio buf + 0x10 (="/dev/root")
@@ -123,14 +123,15 @@ if(0){
 }
 
 		// verify: QUICK DIRTY HACK.
+		// seeing cached area.
 		if(debug_head512 == NULL) {
-			debug_head512 = kmalloc(blk_rq_sectors(hd_req) * 512, GFP_KERNEL | GFP_NOIO);
-			memcpy(debug_head512, bio_data(hd_req->bio), blk_rq_sectors(hd_req) * 512);
+			debug_head512 = kmalloc(blk_rq_cur_bytes(hd_req), GFP_KERNEL | GFP_NOIO);
+			memcpy(debug_head512, bio_data(hd_req->bio), blk_rq_cur_bytes(hd_req));
 		} else {
 			int r;
 			{
 				const unsigned char *p = debug_head512, *q = bio_data(hd_req->bio);
-				int len = blk_rq_sectors(hd_req) * 512;
+				int len = blk_rq_cur_bytes(hd_req);
 				const int atonce = 32;
 				char hexp[atonce*2+1], hexq[atonce*2+1];
 				while(0 < len) {
@@ -141,7 +142,7 @@ if(0){
 							sprintf(hexp + i * 2, "%02X", p[i]);
 							sprintf(hexq + i * 2, "%02X", q[i]);
 						}
-						pr_err("E+%03x: %s %s\n", (unsigned)p - (unsigned)debug_head512, hexp, hexq);
+						pr_err("E+%03xh: %s %s\n", (unsigned)p - (unsigned)debug_head512, hexp, hexq);
 						break;
 					}
 					p += atonce;
@@ -150,9 +151,9 @@ if(0){
 				}
 			}
 
-			if(r /*memcmp(debug_head512, bio_data(hd_req->bio), blk_rq_sectors(hd_req) * 512) != 0*/) {
-				pr_err("%s: read %ld(+%u) verify failed; retrying\n", hd_req->rq_disk->disk_name, blk_rq_pos(hd_req), blk_rq_sectors(hd_req));
-				memcpy(debug_head512, bio_data(hd_req->bio), blk_rq_sectors(hd_req) * 512);
+			if(r /*memcmp(debug_head512, bio_data(hd_req->bio), blk_rq_cur_bytes(hd_req)) != 0*/) {
+				pr_err("%s: debug %p <=> read %ld+%Xh verify failed; retrying\n", hd_req->rq_disk->disk_name, debug_head512, blk_rq_pos(hd_req), blk_rq_cur_bytes(hd_req));
+				memcpy(debug_head512, bio_data(hd_req->bio), blk_rq_cur_bytes(hd_req));
 			} else {
 				kfree(debug_head512);
 				debug_head512 = NULL;
@@ -183,7 +184,8 @@ if(0){
  */
 static void hd_request(void)
 {
-	unsigned int block, nsect;
+	sector_t block;
+	unsigned int nsect, ncurbytes;
 	struct request *req;
 
 	/* do_hd != NULL means waiting read done interrupt, ex. block-queue issued too fast. */
@@ -205,16 +207,18 @@ repeat:
 	block = blk_rq_pos(req);
 	nsect = blk_rq_sectors(req);
 	if (block >= get_capacity(req->rq_disk) || ((block+nsect) > get_capacity(req->rq_disk))) {
-		pr_err("%s: bad access: block=%d, count=%d\n", req->rq_disk->disk_name, block, nsect);
-		hd_end_request_cur(-EIO);
+		pr_err("%s: bad access: block=%ld, count=%d\n", req->rq_disk->disk_name, block, nsect);
+		hd_end_request_entire(-EIO);
 		goto repeat;
 	}
 
+	ncurbytes = blk_rq_cur_bytes(req);
+
 #ifdef DEBUG
-	pr_info("%s: %sing: req=%p, block=%d, sectors=%d, buffer=%p\n",
+	pr_info("%s: %s req: req=%p, block=%ld, size=%Xh/%Xh, buffer=%p\n",
 		req->rq_disk->disk_name,
-		rq_data_dir(req) == READ ? "read" : "writ",
-		req, block, nsect, bio_data(req->bio));
+		rq_data_dir(req) == READ ? "read" : "write",
+		req, block, ncurbytes, nsect * 512, bio_data(req->bio));
 #endif
 	if (req->cmd_type == REQ_TYPE_FS) {
 		switch (rq_data_dir(req)) {
@@ -239,14 +243,14 @@ __flush_cache_all();
 			/* TODO is CPHYSADDR correct?? no other virt2phys like func? */
 			__raw_writel(CPHYSADDR(bio_data(req->bio)), membase + 0x00); // PI_DRAM_ADDR
 			__raw_writel(0x10000000 + block * 512, membase + 0x04); // PI_CART_ADDR
-			__raw_writel(nsect * 512 - 1, membase + 0x0C); // PI_WR_LEN
+			__raw_writel(ncurbytes - 1, membase + 0x0C); // PI_WR_LEN
 			break;
 		case WRITE:
-			hd_end_request_cur(-EROFS);
+			hd_end_request_entire(-EROFS);
 			break;
 		default:
 			pr_err("unknown hd-command\n");
-			hd_end_request_cur(-EIO);
+			hd_end_request_entire(-EIO);
 			break;
 		}
 	}
@@ -298,7 +302,8 @@ static int hd_getgeo(struct block_device *bdev, struct hd_geometry *geo)
 }
 
 static const struct block_device_operations hd_fops = {
-	.getgeo =	hd_getgeo,
+	.owner = THIS_MODULE,
+	.getgeo = hd_getgeo,
 };
 
 static int __init n64cart_init(void)
@@ -325,7 +330,7 @@ static int __init n64cart_init(void)
 	blk_queue_max_hw_sectors(hd_queue, 15); /* FIXME how sectors are good? */
 	blk_queue_logical_block_size(hd_queue, 512);
 
-	disk = alloc_disk(64); /* max 64 minors(parts) */
+	disk = alloc_disk(1); /* max 1 minors(parts) */
 	disk->major = n64cart_major;
 	disk->first_minor = 0;
 	sprintf(disk->disk_name, "cart%c", '0');
