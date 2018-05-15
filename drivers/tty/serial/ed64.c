@@ -495,6 +495,163 @@ static void ed64_poll(unsigned long unused)
 	mod_timer(&ed64_timer, jiffies + ED64_POLL_DELAY);
 }
 
+#ifdef CONFIG_CONSOLE_POLL
+static int ed64_poll_init(struct uart_port *port)
+{
+	unsigned char *rbuf = (unsigned char *)port->private_data;
+
+	rbuf[0] = 0;
+
+	return 0;
+}
+
+// reduced ed64_console_write
+static void ed64_poll_put_char(struct uart_port *port, unsigned char ch)
+{
+	unsigned char sa[1] = {ch};
+	unsigned char *s = sa;
+
+	// TODO PI arbitrator... do not directly access to MMIO here...
+
+	// wait for PI dma done (maybe conflict with CPU R/W)
+	while(__raw_readl((__iomem void *)0xA4600010) & 3) { udelay(1); } // XXX argh!! touching non-requested iomem!!
+
+	ed64_enable(port);
+
+	// Nintendo64 PI requires 32bit access.
+	// supposed big-endian.
+	{
+		unsigned cnt = 1;
+
+		unsigned buf = cnt << 0;
+		unsigned i = 1; // 1 byte (=cnt) already buffered
+		while(i < 256) {
+			buf <<= 8;
+			if(0 < cnt) {
+				buf |= *s++;
+				cnt--;
+			}
+			i++;
+			if(i % 4 == 0) {
+				ed64_dummyread(port); // dummy read required!!
+				__raw_writel(buf, (__iomem unsigned *)(0xB4000000 - 0x0800 + i - 4)); // XXX argh!! touching non-requested iomem!!
+				buf = 0;
+				if(cnt == 0) {
+					break;
+				}
+			}
+		}
+
+		// wait ED64 dma
+		while(ed64_regread(port, 0x04) & 1) { udelay(1); }
+		// transfer cart2usb
+		// TODO txe# should be tested
+		ed64_regwrite(0, port, 0x08); // dmalen in 512bytes - 1
+		ed64_regwrite((0x04000000-0x0800)/0x800, port, 0x0c); // dmaaddr in 2048bytes
+		ed64_regwrite(4, port, 0x14); // dmacfg = 4(ram2fifo)
+		// wait ED64 dma
+		while(ed64_regread(port, 0x04) & 1) { udelay(1); }
+	}
+
+	ed64_disable(port);
+}
+
+static int poll_get_char_from_buf(unsigned char *rbuf)
+{
+	unsigned int i, c;
+	unsigned char r;
+
+	if(rbuf[0] == 0) {
+		return NO_POLL_CHAR;
+	}
+
+	// pick a char from buffer (before pull tail up)
+	r	= rbuf[1];
+
+	// pull tail up
+	c = (unsigned int)rbuf[0];
+	for(i = 1; i < c; i++) {
+		rbuf[i] = rbuf[i + 1];
+	}
+
+	// decr nchars
+	rbuf[0]--;
+
+	return (int)(unsigned int)r;
+}
+
+static int ed64_poll_get_char(struct uart_port *port)
+{
+	int data;
+	// TODO can I trust private_data on panic?
+	unsigned char *rbuf = (unsigned char *)port->private_data;
+
+	// try get from buf
+	if((data = poll_get_char_from_buf(rbuf)) != NO_POLL_CHAR) {
+		return data;
+	}
+
+	// buf is empty. try to get new chars.
+	{
+		// TODO PI arbitrator... do not directly access to MMIO here...
+		// TODO should timeout handling.
+
+		// wait for PI dma done (maybe conflict with CPU R/W)
+		while(__raw_readl((__iomem void *)0xA4600010) & 3) { udelay(1); } // XXX argh!! touching non-requested iomem!!
+
+		ed64_enable(port);
+
+		// if rxf# is high (=no rx), bye.
+		if(ed64_regread(port, 0x04) & 8) {
+			ed64_disable(port);
+			return NO_POLL_CHAR;
+		}
+
+		// wait ED64 dma
+		while(ed64_regread(port, 0x04) & 1) { udelay(1); }
+
+		// transfer usb2cart
+		// TODO timeout should be handled
+		ed64_regwrite(0, port, 0x08); // dmalen in 512bytes - 1
+		ed64_regwrite((0x04000000-0x0800)/0x800, port, 0x0c); // dmaaddr in 2048bytes
+		ed64_regwrite(3, port, 0x14); // dmacfg = 3(fifo2ram)
+
+		// wait ED64 dma
+		while(ed64_regread(port, 0x04) & 1) { udelay(1); }
+
+		// here, ed64_disable can be called... but later.
+
+		// transfer cart2dram
+		// Must be transferred to memory... to process rx data in interruptible context,
+		// that don't be bothered with other PI access (or tty processing).
+		// NOTE can't use PI DMA... spurious interrupt on n64cart.
+		{
+			unsigned int i;
+			for(i = 0; i < 256; i += 4) {
+				*((unsigned int *)(rbuf + i)) = __raw_readl((__iomem void *)(0xB4000000 - 0x0800 + i)); // XXX argh!! touching non-requested iomem!!
+			}
+		}
+
+		ed64_disable(port);
+	}
+
+#ifdef DEBUG
+	pr_info("ed64: got poll rx: %02x%02x %02x%02x %02x%02x %02x%02x\n"
+			,rbuf[0]
+			,rbuf[1]
+			,rbuf[2]
+			,rbuf[3]
+			,rbuf[4]
+			,rbuf[5]
+			,rbuf[6]
+			,rbuf[7]
+			);
+#endif
+
+	return poll_get_char_from_buf(rbuf);
+}
+#endif
+
 #ifdef CONFIG_SERIAL_ED64_CONSOLE
 static void ed64_console_write(struct console *co, const char *_s, unsigned count)
 {
@@ -588,6 +745,11 @@ static struct uart_ops ed64_pops = {
 	.request_port =		ed64_request_port,
 	.config_port =		ed64_config_port,
 	.verify_port =		ed64_verify_port,
+#ifdef CONFIG_CONSOLE_POLL
+	.poll_init = ed64_poll_init,
+	.poll_put_char = ed64_poll_put_char,
+	.poll_get_char = ed64_poll_get_char,
+#endif
 };
 
 /**
