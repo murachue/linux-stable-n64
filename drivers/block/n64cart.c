@@ -41,6 +41,36 @@ static void *debug_head512 = NULL;
 #define SET_HANDLER(x) \
 	do { do_hd = (x); } while(0)
 
+/* FIXME copied from drivers/tty/serial/ed64.c, then modified */
+static void ed64_dummyread(void)
+{
+	__raw_readl((void*)(0xA8040000 + 0x00)); // dummy read required!!
+}
+
+/*
+static unsigned int ed64_regread(unsigned int regoff)
+{
+	ed64_dummyread(); // dummy read required!!
+	return __raw_readl((void*)(0xA8040000 + regoff));
+}
+*/
+
+static void ed64_regwrite(unsigned int value, unsigned int regoff)
+{
+	ed64_dummyread(); // dummy read required!!
+	__raw_writel(value, (void*)(0xA8040000 + regoff));
+}
+
+static void ed64_enable(void)
+{
+	ed64_regwrite(0x1234, 0x20);
+}
+
+static void ed64_disable(void)
+{
+	ed64_regwrite(0, 0x20);
+}
+
 static bool hd_end_request(int err, unsigned int bytes)
 {
 	/* note: I am called from hd_interrupt, it locks queue. __blk_end_request requires that. */
@@ -172,6 +202,41 @@ if(0){
 	hd_request();
 }
 
+static void write_ed64_intr(void)
+{
+	u32 status;
+
+	/* check PI DMA error and retry if error. */
+	status = __raw_readl(membase + 0x10);
+
+#ifdef DEBUG
+	// note: debug print AFTER reading status is important for ed64 console!
+	pr_info("%s: write_ed64_done: req=%p, disk=%ld+%Xh/%Xh, buffer=%p\n",
+	       hd_req->rq_disk->disk_name, hd_req, blk_rq_pos(hd_req),
+	       blk_rq_cur_bytes(hd_req), blk_rq_bytes(hd_req), bio_data(hd_req->bio));
+#endif
+
+	if((status & 7) != 0) {
+		pr_err("%s: PI write error status=%u for %ld+%Xh; retrying\n", hd_req->rq_disk->disk_name, status, blk_rq_pos(hd_req), blk_rq_cur_bytes(hd_req));
+		__raw_writel(3, membase + 0x10); // PI_STATUS = RESET|CLEARINTR
+	} else {
+		/* XXX there are no way to verify? read again?? blocking??? */
+
+		/* TODO reconsider conflict with ed64tty. */
+		ed64_disable();
+
+		/* acking issued blocks for kernel */
+		/* note: I am called from hd_interrupt, it locks queue. __blk_end_request requires that. */
+		if (!__blk_end_request(hd_req, 0, blk_rq_cur_bytes(hd_req))) {
+			/* completed whole request. make see next req. */
+			hd_req = NULL;
+		}
+	}
+
+	/* do next bio or enqueued request */
+	hd_request();
+}
+
 /*
  * The driver enables interrupts as much as possible.  In order to do this,
  * (a) the device-interrupt is disabled before entering hd_request(),
@@ -241,12 +306,10 @@ repeat:
 				pr_err("%s: buffer not aligned 8bytes: %p\n", req->rq_disk->disk_name, pcurbuf);
 			}
 			{
-				unsigned flags;
+				unsigned long flags;
 				local_irq_save(flags);
 				__raw_writel(3, membase + 0x10); // PI_STATUS = RESET|CLEARINTR
-				//__flush_cache_all();
-				dma_cache_inv(pcurbuf, ncurbytes); // or blast_inv_dcache_{range,page}?
-				//asm("mtc0 $0, $18; mtc0 $0, $19; mtc0 %0, $18" : : "r"(CPHYSADDR(pcurbuf) | 1));
+				dma_cache_inv((unsigned long)pcurbuf, ncurbytes); // or blast_inv_dcache_{range,page}?
 				/* TODO is CPHYSADDR correct?? no other virt2phys like func? */
 				__raw_writel(CPHYSADDR(pcurbuf), membase + 0x00); // PI_DRAM_ADDR
 				__raw_writel(0x10000000 + block * 512, membase + 0x04); // PI_CART_ADDR
@@ -256,7 +319,29 @@ repeat:
 			}
 			break;
 		case WRITE:
+// TODO CONFIG_N64CART_ED64WRITE
+#if 0
 			hd_end_request_entire(-EROFS);
+#else
+			SET_HANDLER(write_ed64_intr);
+			if(((unsigned int)pcurbuf & 7) != 0) {
+				pr_err("%s: buffer not aligned 8bytes: %p\n", req->rq_disk->disk_name, pcurbuf);
+			}
+			{
+				unsigned long flags;
+				local_irq_save(flags);
+				ed64_enable();
+				ed64_dummyread(); // dummyread for r2c DMA
+				__raw_writel(3, membase + 0x10); // PI_STATUS = RESET|CLEARINTR
+				dma_cache_wback_inv((unsigned long)pcurbuf, ncurbytes); // or blast_dcache_{range,page}?
+				/* TODO is CPHYSADDR correct?? no other virt2phys like func? */
+				__raw_writel(CPHYSADDR(pcurbuf), membase + 0x00); // PI_DRAM_ADDR
+				__raw_writel(0x10000000 + block * 512, membase + 0x04); // PI_CART_ADDR
+				barrier();
+				__raw_writel(ncurbytes - 1, membase + 0x08); // PI_RD_LEN
+				local_irq_restore(flags);
+			}
+#endif
 			break;
 		default:
 			pr_err("unknown hd-command\n");
