@@ -143,7 +143,7 @@ if(0){
 							sprintf(hexq + i * 2, "%02X", q[i]);
 						}
 						pr_err("E+%03xh: %s %s\n", (unsigned)p - (unsigned)debug_head512, hexp, hexq);
-						break;
+						//break;
 					}
 					p += atonce;
 					q += atonce;
@@ -186,6 +186,7 @@ static void hd_request(void)
 {
 	sector_t block;
 	unsigned int nsect, ncurbytes;
+	void *pcurbuf;
 	struct request *req;
 
 	/* do_hd != NULL means waiting read done interrupt, ex. block-queue issued too fast. */
@@ -213,12 +214,13 @@ repeat:
 	}
 
 	ncurbytes = blk_rq_cur_bytes(req);
+	pcurbuf = bio_data(req->bio);
 
 #ifdef DEBUG
 	pr_info("%s: %s req: req=%p, block=%ld, size=%Xh/%Xh, buffer=%p\n",
 		req->rq_disk->disk_name,
 		rq_data_dir(req) == READ ? "read" : "write",
-		req, block, ncurbytes, nsect * 512, bio_data(req->bio));
+		req, block, ncurbytes, nsect * 512, pcurbuf);
 #endif
 	if (req->cmd_type == REQ_TYPE_FS) {
 		switch (rq_data_dir(req)) {
@@ -235,15 +237,23 @@ repeat:
 			}
 			*/
 			SET_HANDLER(read_intr);
-			if(((unsigned int)(bio_data(req->bio)) & 7) != 0) {
-				pr_err("%s: buffer not aligned 8bytes: %p\n", req->rq_disk->disk_name, bio_data(req->bio));
+			if(((unsigned int)pcurbuf & 7) != 0) {
+				pr_err("%s: buffer not aligned 8bytes: %p\n", req->rq_disk->disk_name, pcurbuf);
 			}
-			__raw_writel(3, membase + 0x10); // PI_STATUS = RESET|CLEARINTR
-__flush_cache_all();
-			/* TODO is CPHYSADDR correct?? no other virt2phys like func? */
-			__raw_writel(CPHYSADDR(bio_data(req->bio)), membase + 0x00); // PI_DRAM_ADDR
-			__raw_writel(0x10000000 + block * 512, membase + 0x04); // PI_CART_ADDR
-			__raw_writel(ncurbytes - 1, membase + 0x0C); // PI_WR_LEN
+			{
+				unsigned flags;
+				local_irq_save(flags);
+				__raw_writel(3, membase + 0x10); // PI_STATUS = RESET|CLEARINTR
+				//__flush_cache_all();
+				dma_cache_inv(pcurbuf, ncurbytes); // or blast_inv_dcache_{range,page}?
+				//asm("mtc0 $0, $18; mtc0 $0, $19; mtc0 %0, $18" : : "r"(CPHYSADDR(pcurbuf) | 1));
+				/* TODO is CPHYSADDR correct?? no other virt2phys like func? */
+				__raw_writel(CPHYSADDR(pcurbuf), membase + 0x00); // PI_DRAM_ADDR
+				__raw_writel(0x10000000 + block * 512, membase + 0x04); // PI_CART_ADDR
+				barrier();
+				__raw_writel(ncurbytes - 1, membase + 0x0C); // PI_WR_LEN
+				local_irq_restore(flags);
+			}
 			break;
 		case WRITE:
 			hd_end_request_entire(-EROFS);
