@@ -14,7 +14,7 @@
 #include <linux/platform_device.h>
 #include <linux/hdreg.h> // struct hd_geometry
 #include <linux/interrupt.h>
-#include <asm/addrspace.h> // CPHYSADDR
+#include <linux/dma-mapping.h>
 
 #define DEVICE_NAME "n64cart"
 /* TODO use probe.arg0 platform_device->resource IORESOURCE_MEM (platform_get_resource IORESOURCE_MEM) */
@@ -23,17 +23,11 @@
 /* TODO use probe.arg0 platform_device->resource IORESOURCE_IRQ (platform_get_irq for with setting trigger) */
 #define PI_IRQ (8+4) /* PI intr at MI_INTR_REG[4] */
 
-/* redundant. should not be required? */
-static struct platform_driver n64cart_driver = {
-	.driver = {
-		.name = "n64pi",
-	},
-};
-
 static DEFINE_SPINLOCK(hd_lock);
 static int n64cart_major;
 static struct request_queue *hd_queue;
 static struct request *hd_req;
+static dma_addr_t curbusaddr;
 static void __iomem *membase;
 static void (*do_hd)(void) = NULL;
 static void *debug_head512 = NULL;
@@ -185,8 +179,11 @@ if(0){
 				pr_err("%s: debug %p <=> read %ld+%Xh verify failed; retrying\n", hd_req->rq_disk->disk_name, debug_head512, blk_rq_pos(hd_req), blk_rq_cur_bytes(hd_req));
 				memcpy(debug_head512, bio_data(hd_req->bio), blk_rq_cur_bytes(hd_req));
 			} else {
+				struct device *dev = &((struct platform_device *)hd_req->rq_disk->private_data)->dev;
+
 				kfree(debug_head512);
 				debug_head512 = NULL;
+				dma_unmap_single(dev, curbusaddr, blk_rq_cur_bytes(hd_req), DMA_FROM_DEVICE);
 
 				/* acking issued blocks for kernel */
 				/* note: I am called from hd_interrupt, it locks queue. __blk_end_request requires that. */
@@ -220,10 +217,13 @@ static void write_ed64_intr(void)
 		pr_err("%s: PI write error status=%u for %ld+%Xh; retrying\n", hd_req->rq_disk->disk_name, status, blk_rq_pos(hd_req), blk_rq_cur_bytes(hd_req));
 		__raw_writel(3, membase + 0x10); // PI_STATUS = RESET|CLEARINTR
 	} else {
+		struct device *dev = &((struct platform_device *)hd_req->rq_disk->private_data)->dev;
 		/* XXX there are no way to verify? read again?? blocking??? */
 
 		/* TODO reconsider conflict with ed64tty. */
 		ed64_disable();
+
+		dma_unmap_single(dev, curbusaddr, blk_rq_cur_bytes(hd_req), DMA_TO_DEVICE);
 
 		/* acking issued blocks for kernel */
 		/* note: I am called from hd_interrupt, it locks queue. __blk_end_request requires that. */
@@ -253,6 +253,7 @@ static void hd_request(void)
 	unsigned int nsect, ncurbytes;
 	void *pcurbuf;
 	struct request *req;
+	struct device *dev;
 
 	/* do_hd != NULL means waiting read done interrupt, ex. block-queue issued too fast. */
 	if (do_hd)
@@ -278,6 +279,7 @@ repeat:
 		goto repeat;
 	}
 
+	dev = &((struct platform_device *)req->rq_disk->private_data)->dev;
 	ncurbytes = blk_rq_cur_bytes(req);
 	pcurbuf = bio_data(req->bio);
 
@@ -309,12 +311,15 @@ repeat:
 				unsigned long flags;
 				local_irq_save(flags);
 				__raw_writel(3, membase + 0x10); // PI_STATUS = RESET|CLEARINTR
-				dma_cache_inv((unsigned long)pcurbuf, ncurbytes); // or blast_inv_dcache_{range,page}?
-				/* TODO is CPHYSADDR correct?? no other virt2phys like func? */
-				__raw_writel(CPHYSADDR(pcurbuf), membase + 0x00); // PI_DRAM_ADDR
-				__raw_writel(0x10000000 + block * 512, membase + 0x04); // PI_CART_ADDR
-				barrier();
-				__raw_writel(ncurbytes - 1, membase + 0x0C); // PI_WR_LEN
+				curbusaddr = dma_map_single(dev, pcurbuf, ncurbytes, DMA_FROM_DEVICE);
+				if(dma_mapping_error(dev, curbusaddr)) {
+					pr_err("%s: can't map DMA buffer for read: %p\n", req->rq_disk->disk_name, pcurbuf);
+				} else {
+					__raw_writel(curbusaddr, membase + 0x00); // PI_DRAM_ADDR
+					__raw_writel(0x10000000 + block * 512, membase + 0x04); // PI_CART_ADDR
+					wmb();
+					__raw_writel(ncurbytes - 1, membase + 0x0C); // PI_WR_LEN
+				}
 				local_irq_restore(flags);
 			}
 			break;
@@ -333,12 +338,15 @@ repeat:
 				ed64_enable();
 				ed64_dummyread(); // dummyread for r2c DMA
 				__raw_writel(3, membase + 0x10); // PI_STATUS = RESET|CLEARINTR
-				dma_cache_wback_inv((unsigned long)pcurbuf, ncurbytes); // or blast_dcache_{range,page}?
-				/* TODO is CPHYSADDR correct?? no other virt2phys like func? */
-				__raw_writel(CPHYSADDR(pcurbuf), membase + 0x00); // PI_DRAM_ADDR
-				__raw_writel(0x10000000 + block * 512, membase + 0x04); // PI_CART_ADDR
-				barrier();
-				__raw_writel(ncurbytes - 1, membase + 0x08); // PI_RD_LEN
+				curbusaddr = dma_map_single(dev, pcurbuf, ncurbytes, DMA_TO_DEVICE);
+				if(dma_mapping_error(dev, curbusaddr)) {
+					pr_err("%s: can't map DMA buffer for write: %p\n", req->rq_disk->disk_name, pcurbuf);
+				} else {
+					__raw_writel(curbusaddr, membase + 0x00); // PI_DRAM_ADDR
+					__raw_writel(0x10000000 + block * 512, membase + 0x04); // PI_CART_ADDR
+					wmb();
+					__raw_writel(ncurbytes - 1, membase + 0x08); // PI_RD_LEN
+				}
 				local_irq_restore(flags);
 			}
 #endif
@@ -401,10 +409,22 @@ static const struct block_device_operations hd_fops = {
 	.getgeo = hd_getgeo,
 };
 
-static int __init n64cart_init(void)
+static int n64cart_probe(struct platform_device *pdev)
 {
 	int error;
 	struct gendisk *disk;
+
+	/* TODO this driver does not support two or more devices. detect that and spit an error. */
+	/* TODO use pdev->res for MMIO and IRQ */
+
+	if(dma_set_mask_and_coherent(&pdev->dev, DMA_BIT_MASK(24)) != 0) {
+		//dev_warn(dev, "n64cart: No suitable DMA available\n");
+		// in MIPS dma-default, dma_map_ops->dma_set_mask does not defined, that cause failure.
+		// and generic, dma_map_ops->map_page does not care dev, means mask is ignored.
+		// so, ignore this error!!
+		pr_err("%s:%u: No suitable DMA available... don't care this!!\n", __func__, __LINE__);
+		//goto out_dmaset;
+	}
 
 	error = register_blkdev(0, DEVICE_NAME);
 	if (error <= 0) {
@@ -425,14 +445,14 @@ static int __init n64cart_init(void)
 	blk_queue_max_hw_sectors(hd_queue, 15); /* FIXME how sectors are good? */
 	blk_queue_logical_block_size(hd_queue, 512);
 
-	disk = alloc_disk(1); /* max 1 minors(parts) */
+	disk = alloc_disk(16); /* max 16 minors(parts) */
 	disk->major = n64cart_major;
 	disk->first_minor = 0;
 	sprintf(disk->disk_name, "cart%c", '0');
 	set_capacity(disk, 48*1024*1024/512); /* FIXME be configurable */
 	disk->fops = &hd_fops;
 	disk->queue = hd_queue;
-	disk->private_data = NULL;
+	disk->private_data = pdev;
 	add_disk(disk); /* no error on add_disk, that is void... */
 
 	if (!request_mem_region(PI_PHYSBASE, PI_SIZE/*bytes*/, DEVICE_NAME)) {
@@ -458,15 +478,8 @@ static int __init n64cart_init(void)
 		goto out_reqirq;
 	}
 
-	error = platform_driver_register(&n64cart_driver);
-	if (error) {
-		pr_err("%s:%u: could not register platform driver\n", __func__, __LINE__);
-		goto out_drvreg;
-	}
-
 	return 0;
-out_drvreg:
-	free_irq(PI_IRQ, NULL);
+
 out_reqirq:
 	iounmap(membase);
 out_ioremap:
@@ -477,10 +490,11 @@ out_reqiomem:
 out_queue:
 	unregister_blkdev(n64cart_major, DEVICE_NAME);
 out_regblk:
+//out_dmaset:
 	return error;
 }
 
-static void __exit n64cart_exit(void)
+static int n64cart_remove(struct platform_device *pdev)
 {
 	iounmap(membase);
 	release_mem_region(PI_PHYSBASE, PI_SIZE);
@@ -488,6 +502,33 @@ static void __exit n64cart_exit(void)
 	//put_disk(disk);
 	blk_cleanup_queue(hd_queue);
 	unregister_blkdev(n64cart_major, DEVICE_NAME);
+	return 0;
+}
+
+static struct platform_driver n64cart_driver = {
+	.probe  = n64cart_probe,
+	.remove = n64cart_remove,
+	.driver = {
+	    .name = "n64pi",
+	},
+};
+
+static int __init n64cart_init(void)
+{
+	int error;
+
+	error = platform_driver_register(&n64cart_driver);
+	if (error) {
+		pr_err("%s:%u: could not register platform driver\n", __func__, __LINE__);
+		return error;
+	}
+
+	return 0;
+}
+
+static void __exit n64cart_exit(void)
+{
+	platform_driver_unregister(&n64cart_driver);
 }
 
 module_init(n64cart_init);
