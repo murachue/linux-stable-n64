@@ -235,11 +235,20 @@ out_getiomem:
 	return ret;
 }
 
+#ifdef CONFIG_OF
+static const struct of_device_id n64vifb_of_match[] = {
+	{ .compatible = "nintendo,vi", },
+	{},
+};
+MODULE_DEVICE_TABLE(of, n64vifb_of_match);
+#endif
+
 static struct platform_driver n64vifb_driver = {
 	.probe  = n64vifb_probe,
 	.remove = 0, /* TODO impl */
 	.driver = {
 	    .name = "n64vi",
+			.of_match_table = of_match_ptr(n64vifb_of_match),
 	},
 };
 

@@ -257,6 +257,7 @@ void __init prom_free_prom_memory(void)
 
 int __init n64_register_devices(void)
 {
+#ifndef CONFIG_OF
 	{
 		/* TODO should assign "name" field to IORES_MEMs for easy identifying in the driver? */
 		static struct resource reses[] = {
@@ -395,6 +396,21 @@ int __init n64_register_devices(void)
 		};
 		platform_device_register(&dev);
 	}
+	{
+		static struct resource reses[] = {
+			{ .flags = IORESOURCE_IRQ, .start = 4 },
+		};
+		static struct platform_device dev = {
+			.name          = "n64prenmi",
+			.resource      = reses,
+			.num_resources = ARRAY_SIZE(reses),
+			/*.dev = {
+				.platform_data = 0,
+			},*/
+		};
+		platform_device_register(&dev);
+	}
+#endif
 	return 0;
 }
 /* TODO umm... someone prepares arch-depends-device-init function? */
