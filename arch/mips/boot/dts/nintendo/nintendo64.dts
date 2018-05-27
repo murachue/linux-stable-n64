@@ -9,7 +9,7 @@
 	model = "Nintendo 64 8MiB memory";
 
 	chosen {
-		bootargs = "keep_bootcon verbose";
+		bootargs = "debug";
 	};
 
 	cpus {
@@ -26,7 +26,7 @@
 		#interrupt-cells = <1>;
 		// from mupen64plus:
 		// IM/IP2: MI_INTR
-		// IM/IP4: HW2? (reset button?)
+		// IM/IP4: HW2? (reset button; PreNMI)
 		// IM/IP7: Compare (also noted in 007-2489-001.pdf pp.104(134/754 pdf pages))
 	};
 
@@ -107,7 +107,7 @@
 	// dummy
 	n64cart@10000000 {
 		compatible = "nintendo,cart";
-		reg = <0x10000000 0x800000>;
+		reg = <0x10000000 0x4000000>;
 
 		bank-width = <2>;
 		device-width = <2>;
@@ -115,23 +115,18 @@
 		#size-cells = <1>;
 
 		partition@0 {
-			label = "uboot";
-			reg = <0x0 0x30000>;
+			label = "ipl3";
+			reg = <0x0 0x1040>;
 			read-only;
 		};
-		partition@30000 {
-			label = "uboot-env";
-			reg = <0x30000 0x10000>;
+		partition@0 {
+			label = "rootfs";
+			reg = <0x0 0x800000>;
 			read-only;
 		};
-		partition@40000 {
-			label = "calibration";
-			reg = <0x40000 0x10000>;
-			read-only;
-		};
-		partition@50000 {
-			label = "linux";
-			reg = <0x50000 0x7b0000>;
+		partition@800000 {
+			label = "swap";
+			reg = <0x800000 0x800000>;
 		};
 	};
 };

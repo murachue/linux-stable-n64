@@ -86,16 +86,23 @@ static struct fb_ops n64vifb_ops = {
 	.fb_imageblit = sys_imageblit,
 };
 
-static int n64vifb_init_device(struct resource *reses)
+static int n64vifb_probe(struct platform_device *dev)
 {
 	int ret;
+	struct resource *memres;
 	u32 *reg;
 	void *fb_start_vm, *fb_start_nocache;
 	u32 fb_start_pm; /* N64 bus is 32bit, u32 instead of uintptr_t is ok. */
 	struct fb_info *info;
 
+	if(!(memres = platform_get_resource(dev, IORESOURCE_MEM, 0))) {
+		pr_err("n64vifb: could not find iomem resource; device_tree or driver bug\n");
+		ret = -ENOMEM;
+		goto out_getiomem;
+	}
+
 	/* TODO ah... it works on regs[0]<512M(that is true in N64), if >=512M then...? if 64bit then...? */
-	reg = ioremap_nocache(reses[0].start, resource_size(&reses[0]));
+	reg = ioremap_nocache(memres->start, resource_size(memres));
 	if (!reg) {
 		pr_err("n64vifb: could not get nocache area for reg\n");
 		ret = -ENOMEM;
@@ -224,37 +231,8 @@ out_physchk:
 out_allocfbm:
 	iounmap(reg);
 out_ioreg:
+out_getiomem:
 	return ret;
-}
-
-#ifdef CONFIG_USE_OF
-static int n64vifb_init_device_of(struct device_node *dp)
-{
-	int r;
-	u32 regs[2];
-	struct resource reses[2];
-
-	r = of_property_read_u32_array(dp, "reg", regs, 2);
-	if (r) {
-		printk(KERN_ERR "n64vifb: could not get reg u32 array. errno=%d\n", r);
-		return r;
-	}
-	reses[0].flags = IORESOURCE_MEM;
-	reses[0].start = regs[0];
-	reses[0].end = regs[0] + regs[1] - 1;
-	reses[1].flags = IORESOURCE_IRQ;
-	reses[1].start = of_irq_get(dp, 0);
-
-	n64vifb_init_device(reses);
-}
-#else /* CONFIG_USE_OF */
-static int n64vifb_probe(struct platform_device *dev)
-{
-#ifndef CONFIG_NINTENDO64
-	return -ENXIO;
-#endif
-	n64vifb_init_device(dev->resource);
-	return 0;
 }
 
 static struct platform_driver n64vifb_driver = {
@@ -264,34 +242,21 @@ static struct platform_driver n64vifb_driver = {
 	    .name = "n64vi",
 	},
 };
-#endif
 
 int __init n64vifb_init(void)
 {
 	int ret = 0;
-#ifdef CONFIG_USE_OF
-	struct device_node *dp;
-#endif
 
 	/* fb_get_options returns 1 if specified name is explicitly "off", or something bad (non-"offb" while ofonly) */
 	if (fb_get_options("n64vifb", NULL))
 		return -ENODEV;
 
-#ifdef CONFIG_USE_OF
-	for (dp = NULL; (dp = of_find_compatible_node(dp, NULL, "nintendo,vi"));) {
-		ret = n64vifb_init_device(dp);
-		if (ret) {
-			return ret;
-		}
-	}
-#else
 	ret = platform_driver_register(&n64vifb_driver);
 	if (ret) {
 		return ret;
 	}
-#endif
 
-	return ret;
+	return 0;
 }
 
 module_init(n64vifb_init);
