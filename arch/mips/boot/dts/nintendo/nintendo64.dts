@@ -85,7 +85,7 @@
 
 	pi@4600000 {
 		compatible = "nintendo,pi";
-		reg = <0x04600000 0x34>;
+		reg = <0x04600000 0x34 0x05000000 0x1AC00000>;
 
 		interrupt-parent = <&miintc>;
 		interrupts = <4>;

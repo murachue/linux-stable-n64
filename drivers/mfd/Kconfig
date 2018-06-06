@@ -1528,5 +1528,17 @@ config MFD_VEXPRESS_SYSREG
 	  System Registers are the platform configuration block
 	  on the ARM Ltd. Versatile Express board.
 
+config MFD_NINTENDO64_PI
+	bool "Nintendo 64 PI"
+	depends on NINTENDO64
+	default y
+	select MFD_CORE
+	help
+		Nintendo 64 PI (Peripheral Interface) support, that is
+		* a read-only storage, or
+		* a read-write storage and virtual tty (by USB) support
+			(EverDrive-64 v3 or 64drive(not currently supported))
+
 endmenu
+
 endif

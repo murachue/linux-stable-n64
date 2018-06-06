@@ -353,8 +353,10 @@ int __init n64_register_devices(void)
 		platform_device_register(&dev);
 	}
 	{
+		// see drivers/mfd/n64pi.c for order of IORESOURCE_MEM
 		static struct resource reses[] = {
-			{ .flags = IORESOURCE_MEM, .start = 0x04600000, .end = 0x04600033 },
+			{ .flags = IORESOURCE_MEM, .start = 0x04600000, .end = 0x04600033 }, // 0th is regmem
+			{ .flags = IORESOURCE_MEM, .start = 0x05000000, .end = 0x1FBFffff }, // 1st is memmem
 			{ .flags = IORESOURCE_IRQ, .start = 8+4 /* mi:4 */ },
 		};
 		static struct platform_device dev = {
