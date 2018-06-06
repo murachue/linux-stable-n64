@@ -279,6 +279,7 @@ int __init n64_register_devices(void)
 	{
 		static struct resource reses[] = {
 			{ .flags = IORESOURCE_MEM, .start = 0x04100000, .end = 0x0410001f },
+			{ .flags = IORESOURCE_MEM, .start = 0x04200000, .end = 0x0420000f },
 			{ .flags = IORESOURCE_IRQ, .start = 8+5 /* mi:5 */ },
 		};
 		static struct platform_device dev = {
@@ -291,21 +292,8 @@ int __init n64_register_devices(void)
 		};
 		platform_device_register(&dev);
 	}
-	{
-		static struct resource reses[] = {
-			{ .flags = IORESOURCE_MEM, .start = 0x04200000, .end = 0x0420000f },
-		};
-		static struct platform_device dev = {
-			.name          = "n64dpspan",
-			.resource      = reses,
-			.num_resources = ARRAY_SIZE(reses),
-			/*.dev = {
-				.platform_data = 0,
-			},*/
-		};
-		platform_device_register(&dev);
-	}
 #if 0
+	/* see arch_init_irq */
 	{
 		static struct resource reses[] = {
 			{ .flags = IORESOURCE_MEM, .start = 0x04300000, .end = 0x0430000f },

@@ -45,15 +45,10 @@
 
 	dp@4100000 {
 		compatible = "nintendo,dp";
-		reg = <0x04100000 0x20>;
+		reg = <0x04100000 0x20 0x04200000 0x10>;
 
 		interrupt-parent = <&miintc>;
 		interrupts = <5>;
-	};
-
-	dpspan@4200000 {
-		compatible = "nintendo,dpspan";
-		reg = <0x04200000 0x10>;
 	};
 
 	miintc: mi@4300000 {
@@ -89,6 +84,33 @@
 
 		interrupt-parent = <&miintc>;
 		interrupts = <4>;
+
+		// dummy
+		n64cart@10000000 {
+			compatible = "nintendo,pi-cart";
+			reg = <0x10000000 0x4000000>;
+
+			bank-width = <2>;
+			device-width = <2>;
+			#address-cells = <1>;
+			#size-cells = <1>;
+
+			partition@0 {
+				label = "ipl3";
+				reg = <0x0 0x1000>;
+				read-only;
+			};
+			// it overlaps
+			partition@1 {
+				label = "rootfs";
+				reg = <0x0 0x800000>;
+				read-only;
+			};
+			partition@800000 {
+				label = "swap";
+				reg = <0x800000 0x800000>;
+			};
+		};
 	};
 
 	ri@4700000 {
@@ -102,31 +124,5 @@
 
 		interrupt-parent = <&miintc>;
 		interrupts = <1>;
-	};
-
-	// dummy
-	n64cart@10000000 {
-		compatible = "nintendo,cart";
-		reg = <0x10000000 0x4000000>;
-
-		bank-width = <2>;
-		device-width = <2>;
-		#address-cells = <1>;
-		#size-cells = <1>;
-
-		partition@0 {
-			label = "ipl3";
-			reg = <0x0 0x1040>;
-			read-only;
-		};
-		partition@0 {
-			label = "rootfs";
-			reg = <0x0 0x800000>;
-			read-only;
-		};
-		partition@800000 {
-			label = "swap";
-			reg = <0x800000 0x800000>;
-		};
 	};
 };
