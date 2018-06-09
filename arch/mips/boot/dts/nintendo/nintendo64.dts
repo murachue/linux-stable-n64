@@ -88,7 +88,7 @@
 		// dummy
 		n64cart@10000000 {
 			compatible = "nintendo,pi-cart";
-			reg = <0x10000000 0x4000000>;
+			reg = <0x10000000 0x3FFf800>;
 
 			bank-width = <2>;
 			device-width = <2>;
