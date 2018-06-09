@@ -13,32 +13,37 @@
 #include <linux/io.h>
 #include <linux/platform_device.h>
 #include <linux/hdreg.h> // struct hd_geometry
-#include <linux/interrupt.h>
-#include <linux/dma-mapping.h>
+#include <linux/gfp.h>
+#include <linux/mfd/n64pi.h>
 
 #define DEVICE_NAME "n64cart"
-/* TODO use probe.arg0 platform_device->resource IORESOURCE_MEM (platform_get_resource IORESOURCE_MEM) */
-#define PI_PHYSBASE 0x04600000
-#define PI_SIZE 0x34
-/* TODO use probe.arg0 platform_device->resource IORESOURCE_IRQ (platform_get_irq for with setting trigger) */
-#define PI_IRQ (8+4) /* PI intr at MI_INTR_REG[4] */
 
 static DEFINE_SPINLOCK(hd_lock);
 static int n64cart_major;
 static struct request_queue *hd_queue;
 static struct request *hd_req;
-static dma_addr_t curbusaddr;
-static void __iomem *membase;
-static void (*do_hd)(void) = NULL;
+static void (*do_hd)(struct n64pi_request *pireq) = NULL;
 static void *debug_head512 = NULL;
 
 #define SET_HANDLER(x) \
 	do { do_hd = (x); } while(0)
 
-/* FIXME copied from drivers/tty/serial/ed64.c, then modified */
-static void ed64_dummyread(void)
+static int ed64_dummyread(struct list_head *list)
 {
-	__raw_readl((void*)(0xA8040000 + 0x00)); // dummy read required!!
+	struct n64pi_request *req;
+
+	req = n64pi_alloc_request(GFP_NOIO);
+	if (!req) {
+		pr_err("%s: could not allocate n64pi_request\n", __func__);
+		return 0;
+	}
+	req->type = N64PI_RTY_C2R_WORD;
+	req->cart_address = 0x08040000 + 0x00; // dummy read REG_CFG required!!
+	req->on_complete = n64pi_free_request;
+	req->on_error = n64pi_free_request;
+	//req->cookie = NULL;
+	list_add_tail(&req->node, list);
+	return 1;
 }
 
 /*
@@ -49,20 +54,45 @@ static unsigned int ed64_regread(unsigned int regoff)
 }
 */
 
-static void ed64_regwrite(unsigned int value, unsigned int regoff)
+static int ed64_regwrite(uint32_t value, unsigned int regoff, struct list_head *list)
 {
-	ed64_dummyread(); // dummy read required!!
-	__raw_writel(value, (void*)(0xA8040000 + regoff));
+	struct n64pi_request *req;
+
+	if (!ed64_dummyread(list)) { // dummy read required!!
+		return 0;
+	}
+
+	req = n64pi_alloc_request(GFP_NOIO);
+	if (!req) {
+		pr_err("%s: could not allocate n64pi_request\n", __func__);
+
+		{
+			struct n64pi_request *pireq_dummyread;
+			pireq_dummyread = list_last_entry(list, struct n64pi_request, node);
+			list_del(&pireq_dummyread->node);
+			kfree(pireq_dummyread);
+		}
+
+		return 0;
+	}
+	req->type = N64PI_RTY_R2C_WORD;
+	req->cart_address = 0x08040000 + regoff;
+	req->value = value;
+	req->on_complete = n64pi_free_request;
+	req->on_error = n64pi_free_request;
+	//req->cookie = NULL;
+	list_add_tail(&req->node, list);
+	return 1;
 }
 
-static void ed64_enable(void)
+static int ed64_enable(struct list_head *list)
 {
-	ed64_regwrite(0x1234, 0x20);
+	return ed64_regwrite(0x1234, 0x20, list);
 }
 
-static void ed64_disable(void)
+static int ed64_disable(struct list_head *list)
 {
-	ed64_regwrite(0, 0x20);
+	return ed64_regwrite(0, 0x20, list);
 }
 
 static bool hd_end_request(int err, unsigned int bytes)
@@ -81,17 +111,20 @@ static bool hd_end_request_entire(int err)
 
 static void hd_request (void);
 
-static void unexpected_hd_intr(void)
+static void unexpected_hd_intr(struct n64pi_request *pireq)
 {
-	pr_warn("%s:%d: spurious interrupt\n", __func__, __LINE__);
+	pr_warn("%s:%d: spurious interrupt pireqtype=%d\n", __func__, __LINE__, pireq->type);
 }
 
-static void read_intr(void)
+static void read_intr(struct n64pi_request *pireq)
 {
 	u32 status;
+	struct n64pi *pi;
 
 	/* check PI DMA error and retry if error. */
-	status = __raw_readl(membase + 0x10);
+	status = pireq->status;
+
+	pi = dev_get_drvdata(((struct platform_device *)hd_req->rq_disk->private_data)->dev.parent); /* TODO dev.parent->parent is n64pi?? ipaq-micro-leds */
 
 #ifdef DEBUG
 	// note: debug print AFTER reading status is important for ed64 console!
@@ -102,7 +135,16 @@ static void read_intr(void)
 
 	if((status & 7) != 0) {
 		pr_err("%s: PI read error status=%u for %ld+%Xh; retrying\n", hd_req->rq_disk->disk_name, status, blk_rq_pos(hd_req), blk_rq_cur_bytes(hd_req));
-		__raw_writel(3, membase + 0x10); // PI_STATUS = RESET|CLEARINTR
+		{
+			struct n64pi_request *pireq;
+			if (!(pireq = n64pi_alloc_request(GFP_NOIO))) {
+				pr_err("%s: can't alloc n64pi_request for resetting\n", hd_req->rq_disk->disk_name);
+			} else {
+				pireq->type = N64PI_RTY_RESET;
+				pireq->on_complete = n64pi_free_request;
+				n64pi_request_async(pi, pireq);
+			}
+		}
 	} else {
 //pr_info("%s: read: %ld+%Xh=>%08x\n", hd_req->rq_disk->disk_name, blk_rq_pos(hd_req), blk_rq_cur_bytes(hd_req), crc32_be(0, (void*)((unsigned int)bio_data(hd_req->bio) | 0xA0000000), blk_rq_cur_bytes(hd_req)));
 //{int s=512/*blk_rq_cur_bytes(hd_req)*/;unsigned char *p=(void*)((unsigned int)bio_data(hd_req->bio) | 0xA0000000),q[64*2+1],*r=q;while(s--){sprintf(r,"%02X",*p++);r+=2;if(s%64==0){pr_info("%s\n",q);r=q;}}}
@@ -179,11 +221,8 @@ if(0){
 				pr_err("%s: debug %p <=> read %ld+%Xh verify failed; retrying\n", hd_req->rq_disk->disk_name, debug_head512, blk_rq_pos(hd_req), blk_rq_cur_bytes(hd_req));
 				memcpy(debug_head512, bio_data(hd_req->bio), blk_rq_cur_bytes(hd_req));
 			} else {
-				struct device *dev = &((struct platform_device *)hd_req->rq_disk->private_data)->dev;
-
 				kfree(debug_head512);
 				debug_head512 = NULL;
-				dma_unmap_single(dev, curbusaddr, blk_rq_cur_bytes(hd_req), DMA_FROM_DEVICE);
 
 				/* acking issued blocks for kernel */
 				/* note: I am called from hd_interrupt, it locks queue. __blk_end_request requires that. */
@@ -199,12 +238,15 @@ if(0){
 	hd_request();
 }
 
-static void write_ed64_intr(void)
+static void write_ed64_intr(struct n64pi_request *pireq)
 {
 	u32 status;
+	struct n64pi *pi;
 
 	/* check PI DMA error and retry if error. */
-	status = __raw_readl(membase + 0x10);
+	status = pireq->status;
+
+	pi = dev_get_drvdata(((struct platform_device *)hd_req->rq_disk->private_data)->dev.parent); /* TODO dev.parent->parent is n64pi?? ipaq-micro-leds */
 
 #ifdef DEBUG
 	// note: debug print AFTER reading status is important for ed64 console!
@@ -215,15 +257,18 @@ static void write_ed64_intr(void)
 
 	if((status & 7) != 0) {
 		pr_err("%s: PI write error status=%u for %ld+%Xh; retrying\n", hd_req->rq_disk->disk_name, status, blk_rq_pos(hd_req), blk_rq_cur_bytes(hd_req));
-		__raw_writel(3, membase + 0x10); // PI_STATUS = RESET|CLEARINTR
+		{
+			struct n64pi_request *pireq;
+			if (!(pireq = n64pi_alloc_request(GFP_NOIO))) {
+				pr_err("%s: can't alloc n64pi_request for resetting\n", hd_req->rq_disk->disk_name);
+			} else {
+				pireq->type = N64PI_RTY_RESET;
+				pireq->on_complete = n64pi_free_request;
+				n64pi_request_async(pi, pireq);
+			}
+		}
 	} else {
-		struct device *dev = &((struct platform_device *)hd_req->rq_disk->private_data)->dev;
 		/* XXX there are no way to verify? read again?? blocking??? */
-
-		/* TODO reconsider conflict with ed64tty. */
-		ed64_disable();
-
-		dma_unmap_single(dev, curbusaddr, blk_rq_cur_bytes(hd_req), DMA_TO_DEVICE);
 
 		/* acking issued blocks for kernel */
 		/* note: I am called from hd_interrupt, it locks queue. __blk_end_request requires that. */
@@ -235,6 +280,20 @@ static void write_ed64_intr(void)
 
 	/* do next bio or enqueued request */
 	hd_request();
+}
+
+static void cart_on_complete(struct n64pi_request *pireq)
+{
+	void (*handler)(struct n64pi_request *pireq) = do_hd;
+
+	spin_lock(hd_queue->queue_lock);
+
+	do_hd = NULL;
+	if (!handler)
+		handler = unexpected_hd_intr;
+	handler(pireq);
+
+	spin_unlock(hd_queue->queue_lock);
 }
 
 /*
@@ -253,7 +312,7 @@ static void hd_request(void)
 	unsigned int nsect, ncurbytes;
 	void *pcurbuf;
 	struct request *req;
-	struct device *dev;
+	struct n64pi *pi;
 
 	/* do_hd != NULL means waiting read done interrupt, ex. block-queue issued too fast. */
 	if (do_hd)
@@ -275,11 +334,12 @@ repeat:
 	nsect = blk_rq_sectors(req);
 	if (block >= get_capacity(req->rq_disk) || ((block+nsect) > get_capacity(req->rq_disk))) {
 		pr_err("%s: bad access: block=%ld, count=%d\n", req->rq_disk->disk_name, block, nsect);
+		hd_req = NULL;
 		hd_end_request_entire(-EIO);
 		goto repeat;
 	}
 
-	dev = &((struct platform_device *)req->rq_disk->private_data)->dev;
+	pi = dev_get_drvdata(((struct platform_device *)req->rq_disk->private_data)->dev.parent); /* TODO dev.parent->parent is n64pi?? ipaq-micro-leds */
 	ncurbytes = blk_rq_cur_bytes(req);
 	pcurbuf = bio_data(req->bio);
 
@@ -292,35 +352,28 @@ repeat:
 	if (req->cmd_type == REQ_TYPE_FS) {
 		switch (rq_data_dir(req)) {
 		case READ:
-			/*
-			for(;;){
-				u32 status = __raw_readl(membase + 0x10);
-				if((status & 7) != 0) {
-					pr_err("%s: PI busy status=%u\n", req->rq_disk->disk_name, status);
-					__raw_writel(3, membase + 0x10); // PI_STATUS = RESET|CLEARINTR
-				} else {
-					break;
-				}
-			}
-			*/
 			SET_HANDLER(read_intr);
 			if(((unsigned int)pcurbuf & 7) != 0) {
 				pr_err("%s: buffer not aligned 8bytes: %p\n", req->rq_disk->disk_name, pcurbuf);
 			}
 			{
-				unsigned long flags;
-				local_irq_save(flags);
-				__raw_writel(3, membase + 0x10); // PI_STATUS = RESET|CLEARINTR
-				curbusaddr = dma_map_single(dev, pcurbuf, ncurbytes, DMA_FROM_DEVICE);
-				if(dma_mapping_error(dev, curbusaddr)) {
-					pr_err("%s: can't map DMA buffer for read: %p\n", req->rq_disk->disk_name, pcurbuf);
-				} else {
-					__raw_writel(curbusaddr, membase + 0x00); // PI_DRAM_ADDR
-					__raw_writel(0x10000000 + block * 512, membase + 0x04); // PI_CART_ADDR
-					wmb();
-					__raw_writel(ncurbytes - 1, membase + 0x0C); // PI_WR_LEN
+				struct n64pi_request *pireq;
+
+				pireq = kzalloc(sizeof(*pireq), GFP_NOIO);
+				if (!pireq) {
+					pr_err("%s: could not allocate n64pi_request\n", req->rq_disk->disk_name);
+					hd_req = NULL;
+					hd_end_request_entire(-ENOMEM);
+					break;
 				}
-				local_irq_restore(flags);
+
+				pireq->type = N64PI_RTY_C2R_DMA;
+				pireq->cart_address = 0x10000000 + block * 512;
+				pireq->ram_vaddress = pcurbuf;
+				pireq->length = ncurbytes;
+				pireq->on_complete = cart_on_complete;
+				//pireq->cookie = NULL;
+				n64pi_request_async(pi, pireq);
 			}
 			break;
 		case WRITE:
@@ -333,26 +386,70 @@ repeat:
 				pr_err("%s: buffer not aligned 8bytes: %p\n", req->rq_disk->disk_name, pcurbuf);
 			}
 			{
-				unsigned long flags;
-				local_irq_save(flags);
-				ed64_enable();
-				ed64_dummyread(); // dummyread for r2c DMA
-				__raw_writel(3, membase + 0x10); // PI_STATUS = RESET|CLEARINTR
-				curbusaddr = dma_map_single(dev, pcurbuf, ncurbytes, DMA_TO_DEVICE);
-				if(dma_mapping_error(dev, curbusaddr)) {
-					pr_err("%s: can't map DMA buffer for write: %p\n", req->rq_disk->disk_name, pcurbuf);
-				} else {
-					__raw_writel(curbusaddr, membase + 0x00); // PI_DRAM_ADDR
-					__raw_writel(0x10000000 + block * 512, membase + 0x04); // PI_CART_ADDR
-					wmb();
-					__raw_writel(ncurbytes - 1, membase + 0x08); // PI_RD_LEN
+				struct list_head reqs;
+				struct n64pi_request *pireq;
+
+				INIT_LIST_HEAD(&reqs);
+
+				if (!ed64_enable(&reqs)) {
+					hd_req = NULL;
+					hd_end_request_entire(-ENOMEM);
+					break;
 				}
-				local_irq_restore(flags);
+
+				if (!ed64_dummyread(&reqs)) { // dummyread for r2c DMA
+					// TODO free reqs
+					hd_req = NULL;
+					hd_end_request_entire(-ENOMEM);
+					break;
+				}
+
+				pireq = n64pi_alloc_request(GFP_NOIO);
+				if (!pireq) {
+					pr_err("%s: could not allocate n64pi_request (%d)\n", req->rq_disk->disk_name, __LINE__);
+					// TODO free reqs
+					hd_req = NULL;
+					hd_end_request_entire(-ENOMEM);
+					break;
+				}
+				pireq->type = N64PI_RTY_RESET;
+				pireq->on_complete = n64pi_free_request;
+				//pireq->on_error = n64pi_free_request;
+				//pireq->cookie = NULL;
+				list_add_tail(&pireq->node, &reqs);
+
+				pireq = n64pi_alloc_request(GFP_NOIO);
+				if (!pireq) {
+					pr_err("%s: could not allocate n64pi_request (%d)\n", req->rq_disk->disk_name, __LINE__);
+					// TODO free reqs
+					hd_req = NULL;
+					hd_end_request_entire(-ENOMEM);
+					break;
+				}
+				pireq->type = N64PI_RTY_R2C_DMA;
+				pireq->cart_address = 0x10000000 + block * 512;
+				pireq->ram_vaddress = pcurbuf;
+				pireq->length = ncurbytes;
+				pireq->on_complete = cart_on_complete;
+				pireq->on_error = n64pi_free_request;
+				//pireq->cookie = NULL;
+				list_add_tail(&pireq->node, &reqs);
+
+				/* enqueue disabling now, or tty may be enqueue while DMAing, wedge as result, potentially cause clashing ED64 reg state. */
+				if (!ed64_disable(&reqs)) {
+					// TODO free reqs
+					hd_req = NULL;
+					hd_end_request_entire(-ENOMEM);
+					break;
+				}
+
+				n64pi_many_request_async(pi, &reqs);
 			}
 #endif
 			break;
 		default:
 			pr_err("unknown hd-command\n");
+			hd_req = NULL;
 			hd_end_request_entire(-EIO);
 			break;
 		}
@@ -363,34 +460,6 @@ repeat:
 static void do_hd_request(struct request_queue *q)
 {
 	hd_request();
-}
-
-/*
- * Releasing a block device means we sync() it, so that it can safely
- * be forgotten about...
- */
-
-static irqreturn_t hd_interrupt(int irq, void *dev_id)
-{
-	void (*handler)(void) = do_hd;
-
-	spin_lock(hd_queue->queue_lock);
-
-	/*
-	 * whatever (even unexpected), acking for PI.
-	 * MUST DO THIS BEFORE EXECUTING HANDLER, because handler may issue another request.
-	 * if do after that, this acks wrong (next) request, cause infinite wait for next request.
-	 */
-	__raw_writel(2, membase + 0x10); // PI_STATUS, [1]=clear_intr
-
-	do_hd = NULL;
-	if (!handler)
-		handler = unexpected_hd_intr;
-	handler();
-
-	spin_unlock(hd_queue->queue_lock);
-
-	return IRQ_HANDLED;
 }
 
 static int hd_getgeo(struct block_device *bdev, struct hd_geometry *geo)
@@ -415,29 +484,19 @@ static int n64cart_probe(struct platform_device *pdev)
 	struct gendisk *disk;
 
 	/* TODO this driver does not support two or more devices. detect that and spit an error. */
-	/* TODO use pdev->res for MMIO and IRQ */
-
-	if(dma_set_mask_and_coherent(&pdev->dev, DMA_BIT_MASK(24)) != 0) {
-		//dev_warn(dev, "n64cart: No suitable DMA available\n");
-		// in MIPS dma-default, dma_map_ops->dma_set_mask does not defined, that cause failure.
-		// and generic, dma_map_ops->map_page does not care dev, means mask is ignored.
-		// so, ignore this error!!
-		pr_err("%s:%u: No suitable DMA available... don't care this!!\n", __func__, __LINE__);
-		//goto out_dmaset;
-	}
 
 	error = register_blkdev(0, DEVICE_NAME);
 	if (error <= 0) {
-		pr_err("%s:%u: register_blkdev failed %d\n", __func__, __LINE__, error);
+		dev_err(&pdev->dev, "register_blkdev failed %d\n", error);
 		goto out_regblk;
 	}
 	n64cart_major = error;
 
-	pr_info("%s:%u: registered block device major %d\n", __func__, __LINE__, n64cart_major);
+	dev_info(&pdev->dev, "registered block device major %d\n", n64cart_major);
 
 	hd_queue = blk_init_queue(do_hd_request, &hd_lock);
 	if (!hd_queue) {
-		pr_err("%s:%u: could not initialize queue\n", __func__, __LINE__);
+		dev_err(&pdev->dev, "could not initialize queue\n");
 		error = -ENOMEM;
 		goto out_queue;
 	}
@@ -455,50 +514,21 @@ static int n64cart_probe(struct platform_device *pdev)
 	disk->private_data = pdev;
 	add_disk(disk); /* no error on add_disk, that is void... */
 
-	if (!request_mem_region(PI_PHYSBASE, PI_SIZE/*bytes*/, DEVICE_NAME)) {
-		pr_err("%s:%u: IOMEM 0x%x busy\n", __func__, __LINE__, PI_PHYSBASE);
-		error = -ENOMEM;
-		goto out_reqiomem;
-	}
-
-	membase = ioremap_nocache(PI_PHYSBASE, PI_SIZE/*bytes*/);
-	if (!membase) {
-		pr_err("%s:%u: could not get nocache area for IOMEM 0x%x\n", __func__, __LINE__, PI_PHYSBASE);
-		error = -ENOMEM;
-		goto out_ioremap;
-	}
-
-	/* ack before requesting IRQ, to avoid spurious intr at start. */
-	/* (it may be 1 because PI used by boot-loader.) */
-	__raw_writel(2, membase + 0x10); // PI_STATUS, [1]=clear_intr
-
-	error = request_irq(PI_IRQ, hd_interrupt, 0, DEVICE_NAME, NULL);
-	if (error) {
-		pr_err("%s:%u: unable to get IRQ%d for the Nintendo 64 cartridge driver\n", __func__, __LINE__, PI_IRQ);
-		goto out_reqirq;
-	}
-
 	return 0;
 
-out_reqirq:
-	iounmap(membase);
-out_ioremap:
-	release_mem_region(PI_PHYSBASE, PI_SIZE);
+/* n64pi mfd does this, never fail to here.
 out_reqiomem:
 	put_disk(disk);
 	blk_cleanup_queue(hd_queue);
+*/
 out_queue:
 	unregister_blkdev(n64cart_major, DEVICE_NAME);
 out_regblk:
-//out_dmaset:
 	return error;
 }
 
 static int n64cart_remove(struct platform_device *pdev)
 {
-	iounmap(membase);
-	release_mem_region(PI_PHYSBASE, PI_SIZE);
-	free_irq(PI_IRQ, NULL);
 	//put_disk(disk);
 	blk_cleanup_queue(hd_queue);
 	unregister_blkdev(n64cart_major, DEVICE_NAME);
@@ -509,7 +539,7 @@ static struct platform_driver n64cart_driver = {
 	.probe  = n64cart_probe,
 	.remove = n64cart_remove,
 	.driver = {
-	    .name = "n64pi",
+	    .name = "n64pi-cart",
 	},
 };
 
