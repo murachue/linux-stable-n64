@@ -109,7 +109,7 @@ static void read_intr(void)
 //{struct request *req=hd_req;void *b=kmalloc(512, GFP_KERNEL | GFP_NOIO);int s=512;unsigned char *p=b,q[64*2+1],*r=q;memcpy(b, (void*)((unsigned int)bio_data(req->bio) | 0xA0000000), 512);while(s--){sprintf(r,"%02X",*p++);r+=2;if(s%64==0){pr_info("%s\n",q);r=q;}};kfree(b);}
 if(0){
 	int size = blk_rq_cur_bytes(hd_req);
-	int *buf = kmalloc(size, GFP_KERNEL | GFP_NOIO);
+	int *buf = kmalloc(size, GFP_NOIO);
 	void *bbuf = (void*)((unsigned int)bio_data(hd_req->bio) | 0xA0000000);
 	//__asm("mtc0 %0,$19; mtc0 %1, $18" : : "r"(0), "r"((((unsigned int)bbuf + 0x10) & 0x1FFFfff8) | 1)); // Write watch to bio buf + 0x10 (="/dev/root")
 	__flush_cache_all();
@@ -149,7 +149,7 @@ if(0){
 		// verify: QUICK DIRTY HACK.
 		// seeing cached area.
 		if(debug_head512 == NULL) {
-			debug_head512 = kmalloc(blk_rq_cur_bytes(hd_req), GFP_KERNEL | GFP_NOIO);
+			debug_head512 = kmalloc(blk_rq_cur_bytes(hd_req), GFP_NOIO);
 			memcpy(debug_head512, bio_data(hd_req->bio), blk_rq_cur_bytes(hd_req));
 		} else {
 			int r;
