@@ -538,7 +538,7 @@ config NINTENDO64
 	select CEVT_R4K
 # can use R4000 series' CP0 count/compare register as clock source (to get how long we passed)
 	select CSRC_R4K
-#?
+# DMA controller does not notify CPU cache; manual cache intervention required
 	select DMA_NONCOHERENT
 # Boot to binary(vmlinux.bin), not ELF.
 	select BOOT_RAW
