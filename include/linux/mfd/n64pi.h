@@ -34,23 +34,16 @@ struct n64pi_request { /* represents a PI command request */
 	void (*on_complete)(struct n64pi_request *req); /* is called on completed this request, you must kfree or reuse req. (NOTE: this is called in interrupt context) */
 	void *cookie; /* is a free field for on_complete. use for any you want. */
 
-	uint32_t status; /* holds the status on just after complete of this request */
+	uint32_t status; /* holds the status on just after complete of this request. TODO consider passing this by on_complete argument to allow register passing. */
 };
 
-struct n64pi { /* represents the driver status of the PI device */
-	struct device *dev; /* is a corresponding platform device */
-	void __iomem *regbase; /* is a base virtual address of PI DMA registers (ie. 0xA4600000) */
-	void __iomem *membase; /* is a base virtual address of CPU word access to PI including SRAM/64DD/ROM area (ie. 0xA5000000) */
-	spinlock_t lock; /* is a lock for this state container */
-	struct list_head queue; /* is a request queue */
-	struct n64pi_request *curreq; /* is a current processing request */
-
-	/* TODO move to n64pi_request? but it is bloating a 32bit word more... */
-	dma_addr_t curbusaddr; /* holds mapped device address for DMA (valid only while DMAing for curreq) */
-};
+struct n64pi; /* private struct of driver */
 
 extern int
 n64pi_request_async(struct n64pi *pi, struct n64pi_request *req);
+
+extern int
+n64pi_wedge_request_async(struct n64pi *pi, struct n64pi_request *req);
 
 extern int
 n64pi_request_sync(struct n64pi *pi, struct n64pi_request *req);

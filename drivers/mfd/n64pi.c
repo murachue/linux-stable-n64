@@ -34,36 +34,63 @@
 #define REG_DRAM2CART 0x0C
 #define REG_STATUS 0x10
 
-static void do_one_request_locked(struct n64pi *pi)
+struct n64pi { /* represents the driver status of the PI device */
+	struct device *dev; /* is a corresponding platform device */
+	void __iomem *regbase; /* is a base virtual address of PI DMA registers (ie. 0xA4600000) */
+	void __iomem *membase; /* is a base virtual address of CPU word access to PI including SRAM/64DD/ROM area (ie. 0xA5000000) */
+	spinlock_t lock; /* is a lock for this state container */
+	struct list_head queue; /* is a request queue */
+	struct n64pi_request *curreq; /* is a current processing request */
+
+	/* TODO move to n64pi_request? but it is bloating a 32bit word more... */
+	dma_addr_t curbusaddr; /* holds mapped device address for DMA (valid only while DMAing for curreq) */
+};
+
+static void do_one_request(struct n64pi *pi)
 {
+	unsigned long flags;
 	struct n64pi_request *req;
+
+	spin_lock_irqsave(&pi->lock, flags);
 
 	if (pi->curreq) {
 		/* another request is ongoing. do nothing here now. */
+		spin_unlock_irqrestore(&pi->lock, flags);
 		return;
 	}
 
 next:
 	if (list_empty(&pi->queue)) {
-		/* nothing enqueued...?? */
+		/* nothing enqueued */
+		spin_unlock_irqrestore(&pi->lock, flags);
 		return;
 	}
 
-	/* dequeue a request into curreq */
-	req = pi->curreq = list_entry(pi->queue.next, struct n64pi_request, node);
+	/* dequeue a request into (cur)req */
+	req = pi->curreq = list_first_entry(&pi->queue, struct n64pi_request, node);
 	list_del_init(&req->node);
 
-	/* reset PI */
-	__raw_writel(0x00000003, pi->regbase + REG_STATUS);
+	spin_unlock_irqrestore(&pi->lock, flags);
+
+	/* PI must be steady (or other driver manipulates PI!?) */
+	if (__raw_readl(pi->regbase + REG_STATUS) & 3) {
+		/* unexpected busy, reset PI to abort it */
+		dev_err(pi->dev, "Unexpected device busy (cmd=%d); resetting.\n", req->type);
+		__raw_writel(0x00000003, pi->regbase + REG_STATUS);
+	}
 
 	switch (req->type) {
 	case N64PI_RTY_C2R_WORD:
 	case N64PI_RTY_R2C_WORD:
 		if (req->cart_address < 0x05000000U || 0x1FD00000U <= req->cart_address) {
 			dev_err(pi->dev, "%s Word cart address out of range: %08X; skipping.\n", req->type == N64PI_RTY_C2R_WORD ? "Cart2RAM" : "RAM2Cart", req->cart_address);
+
+			spin_lock_irqsave(&pi->lock, flags);
 			pi->curreq = NULL;
 			goto next;
 		}
+
+		/* do that request now. */
 
 		switch (req->type) {
 		case N64PI_RTY_C2R_WORD:
@@ -77,12 +104,16 @@ next:
 
 		req->status = __raw_readl(pi->regbase + REG_STATUS);
 		req->on_complete(req);
+
+		spin_lock_irqsave(&pi->lock, flags);
 		pi->curreq = NULL; /* forget after calling on_complete to avoid nested request in on_complete. */
 		goto next;
 	case N64PI_RTY_C2R_DMA:
 	case N64PI_RTY_R2C_DMA:
 		if (req->cart_address < 0x05000000U || 0x1FD00000U <= req->cart_address) {
 			dev_err(pi->dev, "%s DMA cart address out of range: %08X(+%08X); skipping.\n", req->type == N64PI_RTY_C2R_DMA ? "Cart2RAM" : "RAM2Cart", req->cart_address, req->length);
+
+			spin_lock_irqsave(&pi->lock, flags);
 			pi->curreq = NULL;
 			goto next;
 		}
@@ -90,6 +121,8 @@ next:
 			uint32_t end = req->cart_address + req->length - 1;
 			if (end < 0x05000000U || 0x1FD00000U <= end || end < req->cart_address) {
 				dev_err(pi->dev, "%s DMA length out of range: %08X+%08X; skipping.\n", req->type == N64PI_RTY_C2R_DMA ? "Cart2RAM" : "RAM2Cart", req->cart_address, req->length);
+
+				spin_lock_irqsave(&pi->lock, flags);
 				pi->curreq = NULL;
 				goto next;
 			}
@@ -98,9 +131,13 @@ next:
 			dev_err(pi->dev, "%s DMA length is not aligned: (%08X+)%08X; sub driver program error? but continuing!\n", req->type == N64PI_RTY_C2R_DMA ? "Cart2RAM" : "RAM2Cart", req->cart_address, req->length);
 		}
 
+		/* start DMA here, complete on interrupt. */
+
 		pi->curbusaddr = dma_map_single(pi->dev, req->ram_vaddress, req->length, req->type == N64PI_RTY_C2R_DMA ? DMA_FROM_DEVICE : DMA_TO_DEVICE);
 		if(dma_mapping_error(pi->dev, pi->curbusaddr)) {
 			dev_err(pi->dev, "%s DMA can't map DMA buffer: %p+%08X; skipping.\n", req->type == N64PI_RTY_C2R_DMA ? "Cart2RAM" : "RAM2Cart", req->ram_vaddress, req->length);
+
+			spin_lock_irqsave(&pi->lock, flags);
 			pi->curreq = NULL;
 			goto next;
 		}
@@ -125,6 +162,8 @@ next:
 				__raw_writel(0x00000003, pi->regbase + REG_STATUS);
 
 				dev_err(pi->dev, "%s DMA error: (%08X+)%08X status=%08X; skipping!\n", req->type == N64PI_RTY_C2R_DMA ? "Cart2RAM" : "RAM2Cart", req->cart_address, req->length, status);
+
+				spin_lock_irqsave(&pi->lock, flags);
 				pi->curreq = NULL;
 				goto next;
 			}
@@ -135,6 +174,8 @@ next:
 		return;
 	default:
 		dev_err(pi->dev, "Unknown request type: %d; skipping.\n", req->type);
+
+		spin_lock_irqsave(&pi->lock, flags);
 		pi->curreq = NULL;
 		goto next;
 	}
@@ -145,15 +186,44 @@ int n64pi_request_async(struct n64pi *pi, struct n64pi_request *req)
 	unsigned long flags;
 
 	spin_lock_irqsave(&pi->lock, flags);
-
 	list_add_tail(&req->node, &pi->queue);
-	do_one_request_locked(pi); /* to kick enqueued request if nothing is run */
-
 	spin_unlock_irqrestore(&pi->lock, flags);
+
+	do_one_request(pi); /* to kick enqueued request if nothing is run */
 
 	return 0;
 }
-EXPORT_SYMBOL(n64pi_request_async);
+EXPORT_SYMBOL_GPL(n64pi_request_async);
+
+/* TODO consider removing this; left as proof of concept */
+int n64pi_many_request_async(struct n64pi *pi, struct list_head *reqlist)
+{
+	unsigned long flags;
+
+	spin_lock_irqsave(&pi->lock, flags);
+	list_splice_tail_init(reqlist, &pi->queue);
+	spin_unlock_irqrestore(&pi->lock, flags);
+
+	do_one_request(pi); /* to kick enqueued request if nothing is run */
+
+	return 0;
+}
+EXPORT_SYMBOL_GPL(n64pi_many_request_async);
+
+int n64pi_wedge_request_async(struct n64pi *pi, struct n64pi_request *req)
+{
+	unsigned long flags;
+
+	spin_lock_irqsave(&pi->lock, flags);
+	list_add(&req->node, &pi->queue);
+	spin_unlock_irqrestore(&pi->lock, flags);
+
+	/* don't do_one_request here, as this function is called in on_complete that ensures following request processing. */
+	/* though calling do_one_request here is safe. (it does nothing because curreq should be not NULL.) */
+
+	return 0;
+}
+EXPORT_SYMBOL_GPL(n64pi_wedge_request_async);
 
 static void n64pi_complete_completion(struct n64pi_request *req)
 {
@@ -161,6 +231,7 @@ static void n64pi_complete_completion(struct n64pi_request *req)
 	/* don't kfree req completion waiter does it. */
 }
 
+/* TODO this may not be required, consider removing (with above n64pi_complete_completion) */
 int n64pi_request_sync(struct n64pi *pi, struct n64pi_request *req)
 {
 	struct completion *pcomp;
@@ -188,7 +259,7 @@ int n64pi_request_sync(struct n64pi *pi, struct n64pi_request *req)
 
 	return ret;
 }
-EXPORT_SYMBOL(n64pi_request_sync);
+EXPORT_SYMBOL_GPL(n64pi_request_sync);
 
 static irqreturn_t n64pi_isr(int irq, void *dev_id)
 {
@@ -196,26 +267,35 @@ static irqreturn_t n64pi_isr(int irq, void *dev_id)
 	uint32_t status;
 	struct n64pi_request *req;
 
-	/* TODO uh... spin_lock_irqsave/spin_unlock_irqrestore is bad? thinking it just for paranoid. */
-	spin_lock(&pi->lock);
-
 	status = __raw_readl(pi->regbase + REG_STATUS);
 
+	/* TODO uh... spin_lock_irqsave/spin_unlock_irqrestore is bad? thinking it just for paranoid. */
+	/* TODO atomic op? but curreq and queue have tight relation. */
+	spin_lock(&pi->lock);
 	req = pi->curreq;
+	spin_unlock(&pi->lock);
+
 	if (req == NULL) {
 		dev_err(pi->dev, "Spurious interrupt: status=%08X; resetting.\n", status);
+
 		/* reset PI */
 		__raw_writel(0x00000003, pi->regbase + REG_STATUS);
 	} else {
+		/* valid current request found; interrupt means current request's DMA has done */
+
+		/* unmap its buffer */
 		dma_unmap_single(pi->dev, pi->curbusaddr, req->length, req->type == N64PI_RTY_C2R_DMA ? DMA_FROM_DEVICE : DMA_TO_DEVICE);
 
+		/* completes ran request */
 		req->status = status;
 		req->on_complete(req);
-		pi->curreq = NULL; /* forget after calling on_complete to avoid nested request in on_complete. */
-		do_one_request_locked(pi); /* kick next request if already enqueued next, or on_complete does it. */
-	}
 
-	spin_unlock(&pi->lock);
+		spin_lock(&pi->lock);
+		pi->curreq = NULL; /* forget after calling on_complete to avoid nested request in on_complete. */
+		spin_unlock(&pi->lock);
+
+		do_one_request(pi); /* kick next request if already enqueued next, or on_complete does it. */
+	}
 
 	return IRQ_HANDLED;
 }
