@@ -73,9 +73,10 @@ next:
 	spin_unlock_irqrestore(&pi->lock, flags);
 
 	/* PI must be steady (or other driver manipulates PI!?) */
-	if (__raw_readl(pi->regbase + REG_STATUS) & 3) {
-		/* unexpected busy, reset PI to abort it */
-		dev_err(pi->dev, "Unexpected device busy (cmd=%d); resetting.\n", req->type);
+	/* but if current request is RESET, it is expected. (so callee decided issue a RESET request.) */
+	if ((__raw_readl(pi->regbase + REG_STATUS) & 7) && (req->type != N64PI_RTY_RESET)) {
+		/* unexpected busy or has an error, reset PI to abort it (and clear error bit) */
+		dev_err(pi->dev, "Unexpected device busy or has error (cmd=%d); resetting.\n", req->type);
 		__raw_writel(0x00000003, pi->regbase + REG_STATUS);
 	}
 
@@ -84,6 +85,7 @@ next:
 	case N64PI_RTY_R2C_WORD:
 		if (req->cart_address < 0x05000000U || 0x1FD00000U <= req->cart_address) {
 			dev_err(pi->dev, "%s Word cart address out of range: %08X; skipping.\n", req->type == N64PI_RTY_C2R_WORD ? "Cart2RAM" : "RAM2Cart", req->cart_address);
+			req->on_error(req); /* note: I give you req... free that if you want! */
 
 			spin_lock_irqsave(&pi->lock, flags);
 			pi->curreq = NULL;
@@ -94,16 +96,16 @@ next:
 
 		switch (req->type) {
 		case N64PI_RTY_C2R_WORD:
-			req->value = __raw_readl(pi->membase + req->cart_address - 0x05000000U); /* TODO offset is hard coding!! */
+			req->value = __raw_readl(pi->membase + req->cart_address - 0x05000000U); /* TODO hard coding offset!! */
 			break;
 		case N64PI_RTY_R2C_WORD:
-			__raw_writel(req->value, pi->membase + req->cart_address - 0x05000000U); /* TODO offset is hard coding!! */
+			__raw_writel(req->value, pi->membase + req->cart_address - 0x05000000U); /* TODO hard coding offset!! */
 			break;
 		default: BUG(); /* FIXME compiler! */
 		}
 
 		req->status = __raw_readl(pi->regbase + REG_STATUS);
-		req->on_complete(req);
+		req->on_complete(req); /* note: I give you req... free that if you want! */
 
 		spin_lock_irqsave(&pi->lock, flags);
 		pi->curreq = NULL; /* forget after calling on_complete to avoid nested request in on_complete. */
@@ -112,6 +114,7 @@ next:
 	case N64PI_RTY_R2C_DMA:
 		if (req->cart_address < 0x05000000U || 0x1FD00000U <= req->cart_address) {
 			dev_err(pi->dev, "%s DMA cart address out of range: %08X(+%08X); skipping.\n", req->type == N64PI_RTY_C2R_DMA ? "Cart2RAM" : "RAM2Cart", req->cart_address, req->length);
+			req->on_error(req); /* note: I give you req... free that if you want! */
 
 			spin_lock_irqsave(&pi->lock, flags);
 			pi->curreq = NULL;
@@ -121,6 +124,7 @@ next:
 			uint32_t end = req->cart_address + req->length - 1;
 			if (end < 0x05000000U || 0x1FD00000U <= end || end < req->cart_address) {
 				dev_err(pi->dev, "%s DMA length out of range: %08X+%08X; skipping.\n", req->type == N64PI_RTY_C2R_DMA ? "Cart2RAM" : "RAM2Cart", req->cart_address, req->length);
+				req->on_error(req); /* note: I give you req... free that if you want! */
 
 				spin_lock_irqsave(&pi->lock, flags);
 				pi->curreq = NULL;
@@ -128,7 +132,12 @@ next:
 			}
 		}
 		if ((req->length & 7) != 0) {
-			dev_err(pi->dev, "%s DMA length is not aligned: (%08X+)%08X; sub driver program error? but continuing!\n", req->type == N64PI_RTY_C2R_DMA ? "Cart2RAM" : "RAM2Cart", req->cart_address, req->length);
+			dev_err(pi->dev, "%s DMA length is not aligned: (%08X+)%08X; sub driver program error? skipping.\n", req->type == N64PI_RTY_C2R_DMA ? "Cart2RAM" : "RAM2Cart", req->cart_address, req->length);
+			req->on_error(req); /* note: I give you req... free that if you want! */
+
+			spin_lock_irqsave(&pi->lock, flags);
+			pi->curreq = NULL;
+			goto next;
 		}
 
 		/* start DMA here, complete on interrupt. */
@@ -136,6 +145,7 @@ next:
 		pi->curbusaddr = dma_map_single(pi->dev, req->ram_vaddress, req->length, req->type == N64PI_RTY_C2R_DMA ? DMA_FROM_DEVICE : DMA_TO_DEVICE);
 		if(dma_mapping_error(pi->dev, pi->curbusaddr)) {
 			dev_err(pi->dev, "%s DMA can't map DMA buffer: %p+%08X; skipping.\n", req->type == N64PI_RTY_C2R_DMA ? "Cart2RAM" : "RAM2Cart", req->ram_vaddress, req->length);
+			req->on_error(req); /* note: I give you req... free that if you want! */
 
 			spin_lock_irqsave(&pi->lock, flags);
 			pi->curreq = NULL;
@@ -162,6 +172,7 @@ next:
 				__raw_writel(0x00000003, pi->regbase + REG_STATUS);
 
 				dev_err(pi->dev, "%s DMA error: (%08X+)%08X status=%08X; skipping!\n", req->type == N64PI_RTY_C2R_DMA ? "Cart2RAM" : "RAM2Cart", req->cart_address, req->length, status);
+				req->on_error(req); /* note: I give you req... free that if you want! */
 
 				spin_lock_irqsave(&pi->lock, flags);
 				pi->curreq = NULL;
@@ -172,6 +183,27 @@ next:
 		/* interrupt tells this DMA is done. we are done at now. */
 
 		return;
+	case N64PI_RTY_RESET:
+		/* do that request now. */
+
+		/* reset PI */
+		__raw_writel(0x00000003, pi->regbase + REG_STATUS);
+
+		req->status = __raw_readl(pi->regbase + REG_STATUS);
+		req->on_complete(req); /* note: I give you req... free that if you want! */
+
+		spin_lock_irqsave(&pi->lock, flags);
+		pi->curreq = NULL; /* forget after calling on_complete to avoid nested request in on_complete. */
+		goto next;
+	case N64PI_RTY_GET_STATUS:
+		/* do that request now. */
+
+		req->status = __raw_readl(pi->regbase + REG_STATUS);
+		req->on_complete(req); /* note: I give you req... free that if you want! */
+
+		spin_lock_irqsave(&pi->lock, flags);
+		pi->curreq = NULL; /* forget after calling on_complete to avoid nested request in on_complete. */
+		goto next;
 	default:
 		dev_err(pi->dev, "Unknown request type: %d; skipping.\n", req->type);
 
@@ -261,13 +293,24 @@ int n64pi_request_sync(struct n64pi *pi, struct n64pi_request *req)
 }
 EXPORT_SYMBOL_GPL(n64pi_request_sync);
 
+void
+n64pi_free_request(struct n64pi_request *req)
+{
+	kfree(req);
+}
+EXPORT_SYMBOL_GPL(n64pi_free_request);
+
 static irqreturn_t n64pi_isr(int irq, void *dev_id)
 {
 	struct n64pi *pi = dev_id;
 	uint32_t status;
 	struct n64pi_request *req;
 
+	/* get current PI status before do anything */
 	status = __raw_readl(pi->regbase + REG_STATUS);
+
+	/* ack this interrupt (before potential next request in on_complete, not to ack next request... cause infinite wait!) */
+	__raw_writel(2, pi->regbase + REG_STATUS); // [1]=clear_intr
 
 	/* TODO uh... spin_lock_irqsave/spin_unlock_irqrestore is bad? thinking it just for paranoid. */
 	/* TODO atomic op? but curreq and queue have tight relation. */
@@ -288,7 +331,7 @@ static irqreturn_t n64pi_isr(int irq, void *dev_id)
 
 		/* completes ran request */
 		req->status = status;
-		req->on_complete(req);
+		req->on_complete(req); /* note: I give you req... free that if you want! */
 
 		spin_lock(&pi->lock);
 		pi->curreq = NULL; /* forget after calling on_complete to avoid nested request in on_complete. */
@@ -331,14 +374,14 @@ static int __init n64pi_probe(struct platform_device *pdev)
 	res = platform_get_resource(pdev, IORESOURCE_MEM, 0); // 0th is regmem
 	if (!res)
 		return -EINVAL;
-	pi->regbase = devm_ioremap_resource(&pdev->dev, res);
+	pi->regbase = devm_ioremap_resource(&pdev->dev, res); /* TODO devm_ioremap_resource uses devm_ioremap (not nocache), but MIPS becomes nocache. consider other than MIPS? */
 	if (IS_ERR(pi->regbase))
 		return PTR_ERR(pi->regbase);
 
 	res = platform_get_resource(pdev, IORESOURCE_MEM, 1); // 1st is memmem
 	if (!res)
 		return -EINVAL;
-	pi->membase = devm_ioremap_resource(&pdev->dev, res);
+	pi->membase = devm_ioremap_resource(&pdev->dev, res); /* TODO devm_ioremap_resource uses devm_ioremap (not nocache), but MIPS becomes nocache. consider other than MIPS? */
 	if (IS_ERR(pi->membase))
 		return PTR_ERR(pi->membase);
 
