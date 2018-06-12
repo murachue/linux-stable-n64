@@ -261,4 +261,7 @@
 /* STM32 USART */
 #define PORT_STM32	113
 
+/* Nintendo 64 EverDrive-64 v3 pseudo UART */
+#define PORT_ED64	114
+
 #endif /* _UAPILINUX_SERIAL_CORE_H */

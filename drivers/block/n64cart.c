@@ -28,6 +28,7 @@ static void *debug_head512 = NULL;
 #define SET_HANDLER(x) \
 	do { do_hd = (x); } while(0)
 
+/* TODO merge with ed64tty */
 static int ed64_dummyread(struct list_head *list)
 {
 	struct n64pi_request *req;
