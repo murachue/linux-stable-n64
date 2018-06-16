@@ -428,7 +428,7 @@ static int __init n64pi_probe(struct platform_device *pdev)
 		return PTR_ERR(pi->membase);
 
 	// reset the PI (for avoid a spurious irq on next irq request)
-	__raw_writel(0x00000003, pi->membase + REG_STATUS);
+	__raw_writel(0x00000003, pi->regbase + REG_STATUS);
 
 	irq = platform_get_irq(pdev, 0);
 	if (!irq)
