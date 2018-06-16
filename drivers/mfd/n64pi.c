@@ -28,6 +28,8 @@
 #include <linux/completion.h>
 #include <linux/mfd/n64pi.h>
 
+#define DEBUG_REQLOG
+
 #define REG_DRAMADDR 0x00
 #define REG_CARTADDR 0x04
 #define REG_CART2DRAM 0x08
@@ -45,6 +47,42 @@ struct n64pi { /* represents the driver status of the PI device */
 	/* TODO move to n64pi_request? but it is bloating a 32bit word more... */
 	dma_addr_t curbusaddr; /* holds mapped device address for DMA (valid only while DMAing for curreq) */
 };
+
+#ifdef DEBUG_REQLOG
+unsigned n64pi_log[4*1024];
+unsigned n64pi_logi = 0;
+
+static void n64pi_log_put(unsigned v)
+{
+	n64pi_log[n64pi_logi] = v;
+	n64pi_logi = (n64pi_logi + 1) % (sizeof(n64pi_log)/sizeof(*n64pi_log));
+}
+
+static void n64pi_log_req(struct n64pi_request *req)
+{
+	n64pi_log_put(req->type);
+	switch(req->type) {
+	case N64PI_RTY_C2R_WORD:
+	case N64PI_RTY_R2C_WORD:
+		n64pi_log_put(req->cart_address);
+		n64pi_log_put(req->value);
+		n64pi_log_put(0);
+		break;
+	case N64PI_RTY_C2R_DMA:
+	case N64PI_RTY_R2C_DMA:
+		n64pi_log_put((unsigned)req->ram_vaddress);
+		n64pi_log_put(req->cart_address);
+		n64pi_log_put(req->length);
+		break;
+	case N64PI_RTY_RESET:
+	case N64PI_RTY_GET_STATUS:
+		n64pi_log_put(0);
+		n64pi_log_put(0);
+		n64pi_log_put(0);
+		break;
+	}
+}
+#endif
 
 static void do_one_request(struct n64pi *pi)
 {
@@ -69,6 +107,10 @@ next:
 	/* dequeue a request into (cur)req */
 	req = pi->curreq = list_first_entry(&pi->queue, struct n64pi_request, node);
 	list_del_init(&req->node);
+
+#ifdef DEBUG_REQLOG
+	n64pi_log_req(req);
+#endif
 
 	spin_unlock_irqrestore(&pi->lock, flags);
 
