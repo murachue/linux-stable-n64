@@ -59,7 +59,7 @@ static void n64pi_log_put(unsigned v)
 	n64pi_logi = (n64pi_logi + 1) % (sizeof(n64pi_log)/sizeof(*n64pi_log));
 }
 
-static void n64pi_log_req(struct n64pi_request *req)
+static void n64pi_log_req(const struct n64pi *pi, const struct n64pi_request *req)
 {
 	n64pi_log_put(jiffies);
 	switch(req->type) {
@@ -81,10 +81,14 @@ static void n64pi_log_req(struct n64pi_request *req)
 		break;
 	case N64PI_RTY_RESET:
 	case N64PI_RTY_GET_STATUS:
+		n64pi_log_put(req->type << 28);
+		n64pi_log_put(0);
+		n64pi_log_put(0);
+		break;
 	case N64PI_RTY_ED64_ENABLE:
 	case N64PI_RTY_ED64_DISABLE:
 		n64pi_log_put(req->type << 28);
-		n64pi_log_put(0);
+		n64pi_log_put(pi->ed64_enabled);
 		n64pi_log_put(0);
 		break;
 	}
@@ -145,7 +149,7 @@ next:
 	list_del_init(&req->node);
 
 #ifdef DEBUG_REQLOG
-	n64pi_log_req(req);
+	n64pi_log_req(pi, req);
 #endif
 
 	spin_unlock_irqrestore(&pi->lock, flags);
