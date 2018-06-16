@@ -297,21 +297,11 @@ static void ed64_on_writepoll_complete(struct n64pi_request *req)
 		return;
 	}
 
-	{
-		// FIXME reusing ed64_disable brings list_head.
-		struct list_head reqs;
-		INIT_LIST_HEAD(&reqs);
-		if (!ed64_disable(&reqs)) {
-			// TODO free reqs
-		}
-		n64pi_many_request_async(ed64->pi, &reqs);
-	}
-
 	// ED64 DMA is done.
 	ed64->poll_state = POLL_NONE;
 }
 
-static int ed64_request_writetocart_async(struct uart_port *port, int enable_ed64);
+static int ed64_request_writetocart_async(struct uart_port *port);
 
 static void ed64_on_writedma_complete(struct n64pi_request *req)
 {
@@ -329,7 +319,7 @@ static void ed64_on_writedma_complete(struct n64pi_request *req)
 		pr_err("%s: DMA to cart failed status=%x; retrying\n", __func__, pistatus);
 
 		// re-issue DMA request
-		if (!ed64_request_writetocart_async(port, 0)) {
+		if (!ed64_request_writetocart_async(port)) {
 			pr_err("%s: retry failed!! dropping tty tx\n", __func__);
 		}
 		// TODO disable ED64regs... but writetocart failure means ENOMEM, likely fail to it here too.
@@ -339,8 +329,11 @@ static void ed64_on_writedma_complete(struct n64pi_request *req)
 	// we are the single user of ed64 fifo DMA, and we are not doing anything, so assuming fifo DMA is not running.
 	// let's rock.
 	INIT_LIST_HEAD(&reqs);
-	// note: ed64regs are already enabled.
+	if (!ed64_enable(&reqs)) {
+		return;
+	}
 	if (!ed64_regwrite(512/512 - 1, 0x08, &reqs)) { // dmalen in 512bytes - 1
+		// TODO free reqs
 		return;
 	}
 	if (!ed64_regwrite(ed64->rombase / 2048, 0x0c, &reqs)) { // dmaaddr in 2048bytes
@@ -355,6 +348,10 @@ static void ed64_on_writedma_complete(struct n64pi_request *req)
 		// TODO free reqs
 		return;
 	}
+	if (!ed64_disable(&reqs)) {
+		// TODO free reqs
+		return;
+	}
 
 	// requests allocated; we are trying to Cart-to-USB DMA, be "polling for write"
 	ed64->poll_state = POLL_WRITING;
@@ -362,17 +359,15 @@ static void ed64_on_writedma_complete(struct n64pi_request *req)
 	n64pi_many_request_async(ed64->pi, &reqs);
 }
 
-static int ed64_request_writetocart_async(struct uart_port *port, int enable_ed64)
+static int ed64_request_writetocart_async(struct uart_port *port)
 {
 	struct ed64_private *ed64 = (struct ed64_private *)port->private_data;
 	struct list_head reqs;
 
 	INIT_LIST_HEAD(&reqs);
-	if (enable_ed64) {
-		if (!ed64_enable(&reqs)) {
-			pr_err("%s: could not allocate n64pi_request for enable ed64regs\n", __func__);
-			return 0;
-		}
+	if (!ed64_enable(&reqs)) {
+		pr_err("%s: could not allocate n64pi_request for enable ed64regs\n", __func__);
+		return 0;
 	}
 	if (!ed64_dummyread(&reqs)) {
 		pr_err("%s: could not allocate n64pi_request for dummy_read\n", __func__);
@@ -411,6 +406,10 @@ static int ed64_request_writetocart_async(struct uart_port *port, int enable_ed6
 		pireq->cookie = port;
 
 		list_add_tail(&pireq->node, &reqs);
+	}
+	if (!ed64_disable(&reqs)) {
+		pr_err("%s: could not allocate n64pi_request for disable ed64regs\n", __func__);
+		return 0;
 	}
 
 	// we are Ram2Cart PI DMA, don't disturb n64pi by polling ed64 status.
@@ -472,7 +471,7 @@ static void ed64_write(struct uart_port *port)
 			port->icount.tx += count;
 		}
 
-		if (!ed64_request_writetocart_async(port, 1)) {
+		if (!ed64_request_writetocart_async(port)) {
 			return;
 		}
 	}
@@ -595,45 +594,29 @@ static void ed64_on_readpoll_complete(struct n64pi_request *req)
 	// ED64 DMA is done.
 	// Get ED64 ROM rx buffer
 
-	// reset for easy error handling.
-	ed64->poll_state = POLL_NONE;
+	// we are trying to DMA from cart to ram...
+	ed64->poll_state = POLL_PIDMA;
 
 	// note: no need to ed64_enable for cart read
 	{
-		struct list_head reqs;
+		struct n64pi_request *pireq;
 
-		INIT_LIST_HEAD(&reqs);
-
-		if (!ed64_disable(&reqs)) {
+		pireq = n64pi_alloc_request(GFP_KERNEL);
+		if (!pireq) {
 			pr_err("%s: can't allocate n64pi_request for read rx\n", __func__);
-			// oops... give up rx.
+			// oops... give up rx. recover at better.
+			ed64->poll_state = POLL_NONE;
 			return;
 		}
 
-		{
-			struct n64pi_request *pireq;
-			pireq = n64pi_alloc_request(GFP_KERNEL);
-			if (!pireq) {
-				pr_err("%s: can't allocate n64pi_request for read rx\n", __func__);
-				// oops... give up rx.
-				// TODO free reqs
-				return;
-			}
-
-			pireq->type = N64PI_RTY_C2R_DMA;
-			pireq->cart_address = 0x10000000 + ed64->rombase;
-			pireq->ram_vaddress = ed64->xmitbuf;
-			pireq->length = 256;
-			pireq->on_complete = ed64_on_readdma_complete;
-			pireq->on_error = n64pi_free_request; // TODO poll_state to POLL_NONE is required
-			pireq->cookie = port;
-			list_add_tail(&pireq->node, &reqs);
-		}
-
-		// we are trying to DMA from cart to ram...
-		ed64->poll_state = POLL_PIDMA;
-
-		n64pi_many_request_async(ed64->pi, &reqs);
+		pireq->type = N64PI_RTY_C2R_DMA;
+		pireq->cart_address = 0x10000000 + ed64->rombase;
+		pireq->ram_vaddress = ed64->xmitbuf;
+		pireq->length = 256;
+		pireq->on_complete = ed64_on_readdma_complete;
+		pireq->on_error = n64pi_free_request; // TODO poll_state to POLL_NONE is required
+		pireq->cookie = port;
+		n64pi_request_async(ed64->pi, pireq);
 	}
 }
 
@@ -670,6 +653,10 @@ static void ed64_read(struct uart_port *port)
 		return;
 	}
 	if (!ed64_regread(0x04, ed64_on_readpoll_complete, port, &reqs)) {
+		// TODO free reqs
+		return;
+	}
+	if (!ed64_disable(&reqs)) {
 		// TODO free reqs
 		return;
 	}
@@ -1064,7 +1051,7 @@ static void ed64_console_write(struct console *co, const char *buf, unsigned cou
 	unsigned len = (255 < count) ? 255 : count; // min(count, 255)
 	ed64->xmitbuf[0] = len;
 	memcpy(ed64->xmitbuf + 1, buf, len);
-	if (!ed64_request_writetocart_async(&port, 1)) {
+	if (!ed64_request_writetocart_async(&port)) {
 		// error... but putting message cause recursive write. do nothing.
 	}
 }
