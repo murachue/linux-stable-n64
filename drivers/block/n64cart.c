@@ -146,6 +146,7 @@ static void read_intr(struct n64pi_request *pireq)
 			} else {
 				pireq->type = N64PI_RTY_RESET;
 				pireq->on_complete = n64pi_free_request;
+				pireq->on_error = n64pi_free_request;
 				n64pi_request_async(pi, pireq);
 			}
 		}
@@ -274,6 +275,7 @@ static void write_ed64_intr(struct n64pi_request *pireq)
 			} else {
 				pireq->type = N64PI_RTY_RESET;
 				pireq->on_complete = n64pi_free_request;
+				pireq->on_error = n64pi_free_request;
 				n64pi_request_async(pi, pireq);
 			}
 		}
@@ -382,6 +384,7 @@ repeat:
 				pireq->ram_vaddress = pcurbuf;
 				pireq->length = ncurbytes;
 				pireq->on_complete = cart_on_complete;
+				pireq->on_error = n64pi_free_request;
 				//pireq->cookie = NULL;
 				n64pi_request_async(pi, pireq);
 			}
@@ -424,7 +427,7 @@ repeat:
 				}
 				pireq->type = N64PI_RTY_RESET;
 				pireq->on_complete = n64pi_free_request;
-				//pireq->on_error = n64pi_free_request;
+				pireq->on_error = n64pi_free_request;
 				//pireq->cookie = NULL;
 				list_add_tail(&pireq->node, &reqs);
 
