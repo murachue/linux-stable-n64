@@ -412,11 +412,14 @@ arch_initcall(n64_register_devices);
 void prom_putchar(unsigned char ch)
 {
 #if 0
+	// reference copied from ip22
 	__raw_writeb(ch, uart_membase);
 	uart_membase++;
 #elif 0
+	// Customized Project64
 	__raw_writel(ch, (__iomem void *)KSEG1ADDR(0x04400038));
 #elif 1
+	// EverDrive-64 v3
 	unsigned long flags;
 	local_irq_save(flags);
 

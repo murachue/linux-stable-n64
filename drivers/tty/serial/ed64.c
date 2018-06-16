@@ -29,6 +29,7 @@
 #include <linux/console.h>
 #include <linux/delay.h> /* for udelay */
 #include <linux/device.h>
+#include <linux/platform_device.h>
 #include <linux/slab.h>
 
 /* SERIAL_ED64_CONSOLE is required, console is write only but specified tty on console= becomes special, accepts BREAK as SysRQ. */
@@ -46,7 +47,7 @@
 enum ed64_poll_state {
 	POLL_NONE, // just tty rx/tx request
 	POLL_READING, // waiting for finishing ED64 USB-to-ROM DMA (rx)
-	POLL_WRITEDMA, // waiting for finishing RAM-to-Cart PI DMA (tx)
+	POLL_WRITING, // waiting for finishing ED64 ROM-to-USB DMA (tx)
 	POLL_PIDMA, // waiting for finishing Cart/RAM PI DMA
 };
 
@@ -55,7 +56,7 @@ struct ed64_private {
 	enum ed64_poll_state poll_state; // poll (frequentry) for what
 	uint32_t cartbase; // ROM area that is used for rx/tx (2048 bytes align required by ED64 DMA!)
 	uint32_t status; // last polled status
-	unsigned char __attribute((aligned(8))) rxbuf[256]; // 255-bytes receive buffer, NOTE: must be 8 bytes aligned (required by PI DMA)
+	unsigned char __attribute((aligned(8))) xmitbuf[256]; // 255+1-bytes DMA buffer, NOTE: must be 8 bytes aligned (required by PI DMA)
 };
 
 static struct uart_port port;
@@ -170,22 +171,11 @@ static int ed64_disable(struct list_head *list)
  * described by 'port' is empty.  If it is empty, this function
  * should return TIOCSER_TEMT, otherwise return 0.
  */
-static unsigned int ed64_tx_empty(struct uart_port *_port)
+static unsigned int ed64_tx_empty(struct uart_port *port)
 {
-	struct list_head *reqs;
-	if (!ed64_enable(reqs)) {
-		return 0; /* TODO what should return on error? */
-	}
-	if (!ed64_regread(0x04, FUNCTION, reqs)) {
-		/* TODO free reqs */
-		return 0; /* TODO what should return on error? */
-	}
-	if (!ed64_disable(reqs)) {
-		/* TODO free reqs */
-		return 0; /* TODO what should return on error? */
-	}
+	struct ed64_private *ed64 = (struct ed64_private *)port->private_data;
 	// bit2: TXE#; if TXE# is high, because FIFO is filled, report "NOT empty", otherwise report "empty".
-	return (status & 4) ? 0 : TIOCSER_TEMT;
+	return (ed64->status & 4) ? 0 : TIOCSER_TEMT;
 }
 
 /**
@@ -253,7 +243,114 @@ static void ed64_break_ctl(struct uart_port *port, int break_state)
 {
 }
 
-static void ed64_on_status_complete(struct n64pi_request *req);
+static void ed64_on_writepoll_complete(struct n64pi_request *req)
+{
+	struct uart_port *port = (struct uart_port *)req->cookie;
+	struct ed64_private *ed64 = (struct ed64_private *)port->private_data;
+	uint32_t pistatus = req->status;
+	uint32_t ed64status = req->value;
+
+	kfree(req);
+
+	if ((pistatus & 7) != 0) {
+		pr_err("%s: read ED64 status failed status=%x\n", __func__, pistatus);
+		// will be retried by next timer
+		return;
+	}
+
+	ed64->status = ed64status;
+
+	if (ed64status & 1) {
+		// ED64 DMA is still running, poll that later (at timer handler).
+		return;
+	}
+
+	// ED64 DMA is done.
+	ed64->poll_state = POLL_NONE;
+}
+
+static int ed64_request_writetocart_async(struct uart_port *port);
+
+static void ed64_on_writedma_complete(struct n64pi_request *req)
+{
+	struct uart_port *port = (struct uart_port *)req->cookie;
+	struct ed64_private *ed64 = (struct ed64_private *)port->private_data;
+	uint32_t pistatus = req->status;
+	struct list_head reqs;
+
+	kfree(req);
+
+	// reset the poll_state for failing request allocation...
+	ed64->poll_state = POLL_NONE;
+
+	if ((pistatus & 7) != 0) {
+		pr_err("%s: DMA to cart failed status=%x; retrying\n", __func__, pistatus);
+
+		// re-issue DMA request
+		if (!ed64_request_writetocart_async(port)) {
+			pr_err("%s: retry failed!! dropping tty tx\n", __func__);
+		}
+		return;
+	}
+
+	// we are the single user of ed64 fifo DMA, and we are not doing anything, so assuming fifo DMA is not running.
+	// let's rock.
+	INIT_LIST_HEAD(&reqs);
+	if (!ed64_enable(&reqs)) {
+		return;
+	}
+	if (!ed64_regwrite(512/512 - 1, 0x08, &reqs)) { // dmalen in 512bytes - 1
+		// TODO free reqs
+		return;
+	}
+	if (!ed64_regwrite(ed64->cartbase / 2048, 0x0c, &reqs)) { // dmaaddr in 2048bytes
+		// TODO free reqs
+		return;
+	}
+	if (!ed64_regwrite(4, 0x14, &reqs)) { // dmacfg = 4(ram2fifo)
+		// TODO free reqs
+		return;
+	}
+	if (!ed64_regread(0x04, ed64_on_writepoll_complete, port, &reqs)) {
+		// TODO free reqs
+		return;
+	}
+	if (!ed64_disable(&reqs)) {
+		// TODO free reqs
+		return;
+	}
+
+	// requests allocated; we are trying to Cart-to-USB DMA, be "polling for write"
+	ed64->poll_state = POLL_WRITING;
+
+	n64pi_many_request_async(ed64->pi, &reqs);
+}
+
+static int ed64_request_writetocart_async(struct uart_port *port)
+{
+	struct ed64_private *ed64 = (struct ed64_private *)port->private_data;
+	struct n64pi_request *pireq;
+
+	pireq = n64pi_alloc_request(GFP_KERNEL);
+	if (!pireq) {
+		return 0;
+	}
+
+	pireq->type = N64PI_RTY_R2C_DMA;
+	pireq->ram_vaddress = ed64->xmitbuf;
+	pireq->cart_address = ed64->cartbase;
+	pireq->length = 256; // TODO variable for shorter DMA time? but it is small...
+	pireq->on_complete = ed64_on_writedma_complete;
+	pireq->on_error = n64pi_free_request; // TODO poll_state to POLL_NONE is required
+	pireq->cookie = port;
+
+	// we are Ram2Cart PI DMA, don't disturb n64pi by polling ed64 status.
+	ed64->poll_state = POLL_PIDMA;
+
+	n64pi_request_async(ed64->pi, pireq);
+
+	return 1;
+}
 
 /**
  * ed64_write - Write chars to the ed64 fifo.
@@ -266,6 +363,8 @@ static void ed64_on_status_complete(struct n64pi_request *req);
 static void ed64_write(struct uart_port *port)
 {
 	struct circ_buf *xmit = &port->state->xmit;
+
+	// TODO spinlock(_irq) port
 
 	// TODO support software flow control?
 	/*
@@ -282,59 +381,31 @@ static void ed64_write(struct uart_port *port)
 		return;
 	}
 
+	// we have something to send; initiate tx
 	// TODO avoid reentrant with ed64_read??
 
 	{
-		unsigned long flags;
-		local_irq_save(flags); // disable int to avoid clashing with n64cart... XXX
+		struct ed64_private *ed64 = (struct ed64_private *)port->private_data;
 
-		// TODO PI arbitrator... do not directly access to MMIO here...
-
-		// wait for PI dma done (maybe conflict with CPU R/W)
-		while(__raw_readl((__iomem void *)0xA4600010) & 3) { udelay(1); } // XXX argh!! touching non-requested iomem!!
-
-		ed64_enable(port);
-
-		// wait ED64 dma
-		while(ed64_regread(port, 0x04) & 1) { udelay(1); }
-
-		// write into cart
+		// prepare xmitbuf
 		{
+			unsigned char *pbuf = ed64->xmitbuf;
 			unsigned int _count = uart_circ_chars_pending(xmit);
 			unsigned int count = (_count < port->fifosize) ? _count : port->fifosize; // min(count, port->fifosize)
-			unsigned int buf = count & 0xFF; // pre-filled by length field
-			int i = 1; // 1 byte already filled
-			while(i < 1 + port->fifosize) {
-				buf <<= 8;
-				if(!uart_circ_empty(xmit)) {
-					buf |= (unsigned char)xmit->buf[xmit->tail];
-					xmit->tail = (xmit->tail + 1) & (UART_XMIT_SIZE - 1);
-					port->icount.tx++;
-				}
-				i++;
-				if(i % 4 == 0) {
-					ed64_dummyread(port); // dummy read required!!
-					__raw_writel(buf, (__iomem unsigned *)(0xB4000000 - 0x0800 + i - 4)); // XXX argh!! touching non-requested iomem!!
-					buf = 0;
-					if(uart_circ_empty(xmit)) {
-						break;
-					}
-				}
+			unsigned int i;
+
+			*pbuf++ = count;
+			// TODO 1 or 2(wrapped) memcpy?
+			for(i = 0; i < count; i++) {
+				*pbuf++ = (unsigned char)xmit->buf[xmit->tail];
+				xmit->tail = (xmit->tail + 1) & (UART_XMIT_SIZE - 1);
 			}
+			port->icount.tx += count;
 		}
 
-		// transfer cart2usb
-		// TODO txe# should be tested
-		ed64_regwrite(0, port, 0x08); // dmalen in 512bytes - 1
-		ed64_regwrite((0x04000000-0x0800)/0x800, port, 0x0c); // dmaaddr in 2048bytes
-		ed64_regwrite(4, port, 0x14); // dmacfg = 4(ram2fifo)
-
-		// wait ED64 dma
-		while(ed64_regread(port, 0x04) & 1) { udelay(1); }
-
-		ed64_disable(port);
-
-		local_irq_restore(flags);
+		if (!ed64_request_writetocart_async(port)) {
+			return;
+		}
 	}
 
 	if(uart_circ_chars_pending(xmit) < WAKEUP_CHARS)
@@ -357,27 +428,24 @@ static void ed64_on_readdma_complete(struct n64pi_request *req)
 
 	if ((pistatus & 7) != 0) {
 		pr_err("%s: read ED64 rx buffer failed status=%x\n", __func__, pistatus);
-		// will be retried by next timer
+		// will be retried by next timer... TODO really?
 		return;
 	}
 
 	{
-		struct tty_port *ttyport = &port->state->port;
-		int data;
-		__u32 start_count = port->icount.rx;
-		const unsigned char *pbuf = ed64->rxbuf;
+		const unsigned char *pbuf = ed64->xmitbuf; // that just be filled
 		unsigned int count;
 
 #ifdef DEBUG
 		pr_info("ed64: got rx: %02x%02x %02x%02x %02x%02x %02x%02x\n"
-						,rbuf[0]
-						,rbuf[1]
-						,rbuf[2]
-						,rbuf[3]
-						,rbuf[4]
-						,rbuf[5]
-						,rbuf[6]
-						,rbuf[7]
+						,pbuf[0]
+						,pbuf[1]
+						,pbuf[2]
+						,pbuf[3]
+						,pbuf[4]
+						,pbuf[5]
+						,pbuf[6]
+						,pbuf[7]
 					 );
 #endif
 
@@ -388,16 +456,28 @@ static void ed64_on_readdma_complete(struct n64pi_request *req)
 			 }
 			 */
 
+		// TODO spinlock(_irq) port
+
 		if(count == 0) {
 #ifdef DEBUG
 			pr_info("ed64: got break\n");
 #endif
+
 			port->icount.brk++;
 			uart_handle_break(port); // note: return 1 if sysrq prefix
-		} else {
+			return;
+		}
+
+		{
+			int data;
+			struct tty_port *ttyport = &port->state->port;
+			__u32 start_count = port->icount.rx;
+			unsigned int dropped = 0;
+
 #ifdef DEBUG
 			pr_info("ed64: got %d chars\n", count);
 #endif
+
 			do {
 				data = *pbuf++;
 				port->icount.rx++;
@@ -405,12 +485,18 @@ static void ed64_on_readdma_complete(struct n64pi_request *req)
 				if (uart_handle_sysrq_char(port, data & 0xffu))
 					continue;
 
-				tty_insert_flip_char(ttyport, data & 0xFF, TTY_NORMAL);
+				if (tty_insert_flip_char(ttyport, data & 0xFF, TTY_NORMAL) != 1) {
+					dropped++;
+				}
 			} while(--count);
-		}
 
-		if (start_count != port->icount.rx)
-			tty_flip_buffer_push(ttyport);
+			if (start_count != port->icount.rx) {
+				tty_flip_buffer_push(ttyport);
+			}
+			if (0 < dropped) {
+				pr_err("ed64: dropping %u chars; tty buffer full.\n", dropped); // TODO show tty name?
+			}
+		}
 	}
 }
 
@@ -448,7 +534,7 @@ static void ed64_on_readpoll_complete(struct n64pi_request *req)
 
 		pireq = n64pi_alloc_request(GFP_KERNEL);
 		if (!pireq) {
-			pr_err("%s: can't allocate n64pi_request for read rx\n", __func__, req->status);
+			pr_err("%s: can't allocate n64pi_request for read rx\n", __func__);
 			// oops... give up rx. recover at better.
 			ed64->poll_state = POLL_NONE;
 			return;
@@ -456,12 +542,12 @@ static void ed64_on_readpoll_complete(struct n64pi_request *req)
 
 		pireq->type = N64PI_RTY_C2R_DMA;
 		pireq->cart_address = ed64->cartbase;
-		pireq->ram_vaddress = ed64->rxbuf;
+		pireq->ram_vaddress = ed64->xmitbuf;
 		pireq->length = 256;
 		pireq->on_complete = ed64_on_readdma_complete;
 		pireq->on_error = n64pi_free_request; // TODO poll_state to POLL_NONE is required
 		pireq->cookie = port;
-		n64pi_request_async(pi, pireq);
+		n64pi_request_async(ed64->pi, pireq);
 	}
 }
 
@@ -479,32 +565,37 @@ static void ed64_read(struct uart_port *port)
 
 	struct ed64_private *ed64 = (struct ed64_private *)port->private_data;
 	struct list_head reqs;
-	struct n64pi_request *pireq;
-
-	// we are trying to USB-to-Cart DMA, be "polling for read"
-	ed64->poll_state = POLL_READING;
 
 	// let's rock.
 	INIT_LIST_HEAD(&reqs);
 	if (!ed64_enable(&reqs)) {
-		return 0;
+		return;
 	}
 	if (!ed64_regwrite(512/512 - 1, 0x08, &reqs)) { // dmalen in 512bytes - 1
-		return 0;
+		// TODO free reqs
+		return;
 	}
-	if (!ed64_regwrite(port->cartbase / 2048, 0x0c, &reqs)) { // dmaaddr in 2048bytes
-		return 0;
+	if (!ed64_regwrite(ed64->cartbase / 2048, 0x0c, &reqs)) { // dmaaddr in 2048bytes
+		// TODO free reqs
+		return;
 	}
 	if (!ed64_regwrite(3, 0x14, &reqs)) { // dmacfg = 3(fifo2ram)
-		return 0;
+		// TODO free reqs
+		return;
 	}
 	if (!ed64_regread(0x04, ed64_on_readpoll_complete, port, &reqs)) {
-		return 0;
+		// TODO free reqs
+		return;
 	}
 	if (!ed64_disable(&reqs)) {
-		return 0;
+		// TODO free reqs
+		return;
 	}
-	n64pi_many_request_async(pi, &reqs);
+
+	// requests allocated; we are trying to USB-to-Cart DMA, be "polling for read"
+	ed64->poll_state = POLL_READING;
+
+	n64pi_many_request_async(ed64->pi, &reqs);
 }
 
 /**
@@ -594,7 +685,7 @@ static int ed64_request_port(struct uart_port *port)
  */
 static void ed64_config_port(struct uart_port *port, int type)
 {
-	port->type = PORT_MUX;
+	port->type = PORT_ED64;
 }
 
 /**
@@ -629,16 +720,18 @@ static void ed64_on_status_complete(struct n64pi_request *req)
 
 	ed64->status = ed64status;
 
+	// first dispatch follows.
+
 	// if DMABUSY is low (no ED64 DMA is running) and rxf# is low (=have rx), do read.
 	if(!(ed64status & 9)) {
-		ed64_read(&port);
+		ed64_read(port);
 	} else {
 		// calling ed64_read cause ED64 (USB) DMA... put tx in "else" block.
 
 		// if DMABUSY is low (no ED64 DMA is running) and txe# is low (=can tx), do write.
 		// almost call will do nothing because port have no enqueued chars.
 		if(!(ed64status & 5)) {
-			ed64_write(&port);
+			ed64_write(port);
 		}
 	}
 }
@@ -646,21 +739,30 @@ static void ed64_on_status_complete(struct n64pi_request *req)
 static void ed64_status(struct uart_port *port)
 {
 	struct ed64_private *ed64 = (struct ed64_private *)port->private_data;
+	void (*on_complete)(struct n64pi_request *);
 	struct list_head reqs;
-	struct n64pi_request *pireq;
+
+	switch(ed64->poll_state) {
+	case POLL_NONE:    on_complete = ed64_on_status_complete; break;
+	case POLL_READING: on_complete = ed64_on_readpoll_complete; break;
+	case POLL_WRITING: on_complete = ed64_on_writepoll_complete; break;
+	case POLL_PIDMA:   return; // don't disturb n64pi while PI-DMA is enqueued/running by ed64tty.
+	}
 
 	INIT_LIST_HEAD(&reqs);
 	if (!ed64_enable(&reqs)) {
-		return 0;
+		return;
 	}
-	if (!ed64_regread(0x04, ed64_on_status_complete, port, &reqs)) {
-		return 0;
+	if (!ed64_regread(0x04, on_complete, port, &reqs)) {
+		// TODO free reqs
+		return;
 	}
 	if (!ed64_disable(&reqs)) {
-		return 0;
+		// TODO free reqs
+		return;
 	}
 
-	n64pi_many_request_async(pi, &reqs);
+	n64pi_many_request_async(ed64->pi, &reqs);
 }
 
 /**
@@ -668,22 +770,52 @@ static void ed64_status(struct uart_port *port)
  * @unused: Unused variable
  *
  * This function periodically polls the Serial ed64 to check for new data.
+ * note: this is NOT for CONSOLE_POLL.
  */
 static void ed64_poll(unsigned long unused)
 {
 	if(enabled) {
+		// polling status is the beginning of everything.
 		ed64_status(&port);
 	}
 
-	// schedule next polling
+	// re-schedule next polling
 	mod_timer(&ed64_timer, jiffies + ED64_POLL_DELAY);
 }
 
 #ifdef CONFIG_CONSOLE_POLL
+
+static void ed64_direct_dummyread(const struct uart_port *port)
+{
+	__raw_readl(port->membase + 0x00);
+}
+
+static unsigned int ed64_direct_regread(const struct uart_port *port, unsigned int regoff)
+{
+	ed64_dummyread(port); // dummy read required!!
+	return __raw_readl(port->membase + regoff);
+}
+
+static void ed64_direct_regwrite(unsigned int value, const struct uart_port *port, unsigned int regoff)
+{
+	ed64_dummyread(port); // dummy read required!!
+	__raw_writel(value, port->membase + regoff);
+}
+
+static void ed64_direct_enable(const struct uart_port *port)
+{
+	ed64_direct_regwrite(0x1234, port, 0x20);
+}
+
+static void ed64_direct_disable(const struct uart_port *port)
+{
+	ed64_direct_regwrite(0, port, 0x20);
+}
+
 /* TODO poll_init called on early, not just before starting poll... can console_poll live with ordinal tty!? */
 static int ed64_poll_init(struct uart_port *port)
 {
-	unsigned char *rbuf = ((struct ed64_private *)port->private_data)->rxbuf;
+	unsigned char *rbuf = ((struct ed64_private *)port->private_data)->xmitbuf;
 
 	rbuf[0] = 0;
 
@@ -701,7 +833,7 @@ static void ed64_poll_put_char(struct uart_port *port, unsigned char ch)
 	// wait for PI dma done (maybe conflict with CPU R/W)
 	while(__raw_readl((__iomem void *)0xA4600010) & 3) { udelay(1); } // XXX argh!! touching non-requested iomem!!
 
-	ed64_enable(port);
+	ed64_direct_enable(port);
 
 	// Nintendo64 PI requires 32bit access.
 	// supposed big-endian.
@@ -718,7 +850,7 @@ static void ed64_poll_put_char(struct uart_port *port, unsigned char ch)
 			}
 			i++;
 			if(i % 4 == 0) {
-				ed64_dummyread(port); // dummy read required!!
+				ed64_direct_dummyread(port); // dummy read required!!
 				__raw_writel(buf, (__iomem unsigned *)(0xB4000000 - 0x0800 + i - 4)); // XXX argh!! touching non-requested iomem!!
 				buf = 0;
 				if(cnt == 0) {
@@ -728,17 +860,17 @@ static void ed64_poll_put_char(struct uart_port *port, unsigned char ch)
 		}
 
 		// wait ED64 dma
-		while(ed64_regread(port, 0x04) & 1) { udelay(1); }
+		while(ed64_direct_regread(port, 0x04) & 1) { udelay(1); }
 		// transfer cart2usb
 		// TODO txe# should be tested
-		ed64_regwrite(0, port, 0x08); // dmalen in 512bytes - 1
-		ed64_regwrite((0x04000000-0x0800)/0x800, port, 0x0c); // dmaaddr in 2048bytes
-		ed64_regwrite(4, port, 0x14); // dmacfg = 4(ram2fifo)
+		ed64_direct_regwrite(0, port, 0x08); // dmalen in 512bytes - 1
+		ed64_direct_regwrite((0x04000000-0x0800)/0x800, port, 0x0c); // dmaaddr in 2048bytes
+		ed64_direct_regwrite(4, port, 0x14); // dmacfg = 4(ram2fifo)
 		// wait ED64 dma
-		while(ed64_regread(port, 0x04) & 1) { udelay(1); }
+		while(ed64_direct_regread(port, 0x04) & 1) { udelay(1); }
 	}
 
-	ed64_disable(port);
+	ed64_direct_disable(port);
 }
 
 static int poll_get_char_from_buf(unsigned char *rbuf)
@@ -769,7 +901,7 @@ static int ed64_poll_get_char(struct uart_port *port)
 {
 	int data;
 	// TODO can I trust private_data on panic?
-	unsigned char *rbuf = ((struct ed64_private *)port->private_data)->rxbuf;
+	unsigned char *rbuf = ((struct ed64_private *)port->private_data)->xmitbuf;
 
 	// try get from buf
 	if((data = poll_get_char_from_buf(rbuf)) != NO_POLL_CHAR) {
@@ -784,27 +916,27 @@ static int ed64_poll_get_char(struct uart_port *port)
 		// wait for PI dma done (maybe conflict with CPU R/W)
 		while(__raw_readl((__iomem void *)0xA4600010) & 3) { udelay(1); } // XXX argh!! touching non-requested iomem!!
 
-		ed64_enable(port);
+		ed64_direct_enable(port);
 
 		// if rxf# is high (=no rx), bye.
-		if(ed64_regread(port, 0x04) & 8) {
-			ed64_disable(port);
+		if(ed64_direct_regread(port, 0x04) & 8) {
+			ed64_direct_disable(port);
 			return NO_POLL_CHAR;
 		}
 
 		// wait ED64 dma
-		while(ed64_regread(port, 0x04) & 1) { udelay(1); }
+		while(ed64_direct_regread(port, 0x04) & 1) { udelay(1); }
 
 		// transfer usb2cart
 		// TODO timeout should be handled
-		ed64_regwrite(0, port, 0x08); // dmalen in 512bytes - 1
-		ed64_regwrite((0x04000000-0x0800)/0x800, port, 0x0c); // dmaaddr in 2048bytes
-		ed64_regwrite(3, port, 0x14); // dmacfg = 3(fifo2ram)
+		ed64_direct_regwrite(0, port, 0x08); // dmalen in 512bytes - 1
+		ed64_direct_regwrite((0x04000000-0x0800)/0x800, port, 0x0c); // dmaaddr in 2048bytes
+		ed64_direct_regwrite(3, port, 0x14); // dmacfg = 3(fifo2ram)
 
 		// wait ED64 dma
-		while(ed64_regread(port, 0x04) & 1) { udelay(1); }
+		while(ed64_direct_regread(port, 0x04) & 1) { udelay(1); }
 
-		// here, ed64_disable can be called... but later.
+		// here, ed64_direct_disable can be called... but later.
 
 		// transfer cart2dram
 		// Must be transferred to memory... to process rx data in interruptible context,
@@ -817,7 +949,7 @@ static int ed64_poll_get_char(struct uart_port *port)
 			}
 		}
 
-		ed64_disable(port);
+		ed64_direct_disable(port);
 	}
 
 #ifdef DEBUG
@@ -968,12 +1100,12 @@ static int ed64_probe(struct platform_device *pdev)
 	ed64->poll_state = POLL_NONE;
 	ed64->cartbase = (0x04000000-0x0800); // TODO configurable or IORESOURCE_MEM/IO?
 	ed64->status = 0;
-	ed64->rxbuf[0] = 0;
+	ed64->xmitbuf[0] = 0;
 
 	/* register a port in driver */
 	port.iobase = 0; // no I/O port
 	port.mapbase = 0; // MMIO is handled by n64pi
-	port.membase = 0; // ditto
+	port.membase = (__iomem void*)0xA8040000; // ditto... but CONSOLE_POLL uses this FIXME use ioremap but n64pi does that!!
 	port.iotype = UPIO_MEM32BE;
 	port.type = PORT_ED64;
 	port.irq = 0; // no IRQ (polling...)
@@ -1030,6 +1162,8 @@ static int ed64_remove(struct platform_device *pdev)
 		kfree(port.private_data);
 
 	uart_unregister_driver(&ed64_uart);
+
+	return 0;
 }
 
 static struct platform_driver ed64_driver = {
