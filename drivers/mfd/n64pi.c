@@ -438,10 +438,10 @@ static irqreturn_t n64pi_isr(int irq, void *dev_id)
 		dma_unmap_single(pi->dev, pi->curbusaddr, req->length, req->type == N64PI_RTY_C2R_DMA ? DMA_FROM_DEVICE : DMA_TO_DEVICE);
 
 #ifdef DEBUG_REQLOG
-		n64pi_log_put(((unsigned*)(req->cart_address + 0xB0000000))[0]);
-		n64pi_log_put(((unsigned*)(req->cart_address + 0xB0000000))[1]);
-		n64pi_log_put(((unsigned*)(req->cart_address + 0xB0000000))[2]);
-		n64pi_log_put(((unsigned*)(req->cart_address + 0xB0000000))[3]);
+		n64pi_log_put(((unsigned*)(req->cart_address + 0xA0000000))[0]);
+		n64pi_log_put(((unsigned*)(req->cart_address + 0xA0000000))[1]);
+		n64pi_log_put(((unsigned*)(req->cart_address + 0xA0000000))[2]);
+		n64pi_log_put(((unsigned*)(req->cart_address + 0xA0000000))[3]);
 #endif
 
 		/* completes ran request */
