@@ -519,6 +519,7 @@ static int __init n64pi_probe(struct platform_device *pdev)
 	spin_lock_init(&pi->lock);
 	INIT_LIST_HEAD(&pi->queue);
 	pi->curreq = NULL;
+	pi->ed64_enabled = 0;
 	platform_set_drvdata(pdev, pi);
 
 	/* do this after device.driver_data is populated, cuz children referefence it as dev.parent.driver_data. */
