@@ -1,4 +1,5 @@
 //#define DEBUG
+//#define N64CART_VERIFY_READ // NOTE: VERIFY_READ is already defined...
 
 /* large parts from drivers/block/hd.c */
 /* TODO rename "hd" */
@@ -23,7 +24,9 @@ static int n64cart_major;
 static struct request_queue *hd_queue;
 static struct request *hd_req;
 static void (*do_hd)(struct n64pi_request *pireq) = NULL;
+#ifdef N64CART_VERIFY_READ
 static void *debug_head512 = NULL;
+#endif
 
 #define SET_HANDLER(x) \
 	do { do_hd = (x); } while(0)
@@ -150,7 +153,8 @@ static void read_intr(struct n64pi_request *pireq)
 //pr_info("%s: read: %ld+%Xh=>%08x\n", hd_req->rq_disk->disk_name, blk_rq_pos(hd_req), blk_rq_cur_bytes(hd_req), crc32_be(0, (void*)((unsigned int)bio_data(hd_req->bio) | 0xA0000000), blk_rq_cur_bytes(hd_req)));
 //{int s=512/*blk_rq_cur_bytes(hd_req)*/;unsigned char *p=(void*)((unsigned int)bio_data(hd_req->bio) | 0xA0000000),q[64*2+1],*r=q;while(s--){sprintf(r,"%02X",*p++);r+=2;if(s%64==0){pr_info("%s\n",q);r=q;}}}
 //{struct request *req=hd_req;void *b=kmalloc(512, GFP_KERNEL | GFP_NOIO);int s=512;unsigned char *p=b,q[64*2+1],*r=q;memcpy(b, (void*)((unsigned int)bio_data(req->bio) | 0xA0000000), 512);while(s--){sprintf(r,"%02X",*p++);r+=2;if(s%64==0){pr_info("%s\n",q);r=q;}};kfree(b);}
-if(0){
+#if 0
+{
 	int size = blk_rq_cur_bytes(hd_req);
 	int *buf = kmalloc(size, GFP_NOIO);
 	void *bbuf = (void*)((unsigned int)bio_data(hd_req->bio) | 0xA0000000);
@@ -188,7 +192,9 @@ if(0){
 	}
 	kfree(buf);
 }
+#endif
 
+#ifdef N64CART_VERIFY_READ
 		// verify: QUICK DIRTY HACK.
 		// seeing cached area.
 		if(debug_head512 == NULL) {
@@ -224,6 +230,7 @@ if(0){
 			} else {
 				kfree(debug_head512);
 				debug_head512 = NULL;
+#endif
 
 				/* acking issued blocks for kernel */
 				/* note: I am called from hd_interrupt, it locks queue. __blk_end_request requires that. */
@@ -231,8 +238,10 @@ if(0){
 					/* completed whole request. make see next req. */
 					hd_req = NULL;
 				}
+#ifdef N64CART_VERIFY_READ
 			}
 		}
+#endif
 	}
 
 	/* do next bio or enqueued request */
