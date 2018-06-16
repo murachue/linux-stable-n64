@@ -992,6 +992,7 @@ static void ed64_console_write(struct console *co, const char *buf, unsigned cou
 	// TODO avoid reentrant with ed64_read/ed64_write??
 
 	// note: port is partially initialized... for write, private_data is enough here.
+	// TODO check ED64 DMA status
 	// TODO spinlock_irq port.lock
 	struct ed64_private *ed64 = port.private_data;
 	unsigned len = (255 < count) ? 255 : count; // min(count, 255)
