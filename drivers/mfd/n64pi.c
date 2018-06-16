@@ -185,6 +185,7 @@ next:
 			break;
 		case N64PI_RTY_R2C_WORD:
 			__raw_writel(req->value, pi->membase + req->cart_address - 0x05000000U); /* TODO hard coding offset!! */
+			while(__raw_readl(pi->regbase + REG_STATUS) & 3);
 			break;
 		default: BUG(); /* FIXME compiler! */
 		}
@@ -202,6 +203,7 @@ next:
 		case N64PI_RTY_ED64_ENABLE:
 			if (pi->ed64_enabled == 0) {
 				ed64_enable(pi->membase - 0x05000000U + 0x08040000); /* TODO hard coding offset!! */
+				while(__raw_readl(pi->regbase + REG_STATUS) & 3); // ED64 regs seems slow, wait for completion.
 			}
 			// TODO INT_MAX check?
 			pi->ed64_enabled++;
@@ -209,6 +211,7 @@ next:
 		case N64PI_RTY_ED64_DISABLE:
 			if (pi->ed64_enabled == 1) {
 				ed64_disable(pi->membase - 0x05000000U + 0x08040000); /* TODO hard coding offset!! */
+				while(__raw_readl(pi->regbase + REG_STATUS) & 3); // ED64 regs seems slow, wait for completion.
 			}
 			pi->ed64_enabled--;
 			if (pi->ed64_enabled < 0) {
@@ -265,6 +268,26 @@ next:
 			spin_lock_irqsave(&pi->lock, flags);
 			pi->curreq = NULL;
 			goto next;
+		}
+
+		/* XXX DEBUG XXX */
+		if(req->type == N64PI_RTY_R2C_DMA) {
+#if 0
+			__raw_writel(__raw_readl((void __iomem *)((unsigned)req->ram_vaddress | 0xA0000000)), (void __iomem *)(pi->membase - 0x05000000 + req->cart_address));
+			while(__raw_readl(pi->regbase + REG_STATUS) & 3);
+			ed64_dummyread(pi->membase - 0x05000000U + 0x08040000);
+			while(__raw_readl(pi->regbase + REG_STATUS) & 3);
+			//__raw_writel(0x00000003, pi->regbase + REG_STATUS);
+			if(__raw_readl(pi->regbase + REG_STATUS) & 4) {
+extern void stub(void); stub();
+			}
+#endif
+			if (!pi->ed64_enabled) {
+extern void stub(void); stub();
+			}
+			ed64_dummyread(pi->membase - 0x05000000U + 0x08040000);
+			__raw_writel(0x00000003, pi->regbase + REG_STATUS);
+			while(__raw_readl(pi->regbase + REG_STATUS) & 3);
 		}
 
 		__raw_writel(req->cart_address, pi->regbase + REG_CARTADDR);
