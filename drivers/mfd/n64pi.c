@@ -60,23 +60,27 @@ static void n64pi_log_put(unsigned v)
 
 static void n64pi_log_req(struct n64pi_request *req)
 {
-	n64pi_log_put(req->type);
+	n64pi_log_put(jiffies);
 	switch(req->type) {
 	case N64PI_RTY_C2R_WORD:
 	case N64PI_RTY_R2C_WORD:
+		n64pi_log_put(req->type << 28);
 		n64pi_log_put(req->cart_address);
 		n64pi_log_put(req->value);
-		n64pi_log_put(0);
 		break;
 	case N64PI_RTY_C2R_DMA:
 	case N64PI_RTY_R2C_DMA:
-		n64pi_log_put((unsigned)req->ram_vaddress);
+		n64pi_log_put((req->type << 28) | req->length);
 		n64pi_log_put(req->cart_address);
-		n64pi_log_put(req->length);
+		n64pi_log_put((unsigned)req->ram_vaddress);
+		n64pi_log_put(((unsigned*)req->ram_vaddress)[0]);
+		n64pi_log_put(((unsigned*)req->ram_vaddress)[1]);
+		n64pi_log_put(((unsigned*)req->ram_vaddress)[2]);
+		n64pi_log_put(((unsigned*)req->ram_vaddress)[3]);
 		break;
 	case N64PI_RTY_RESET:
 	case N64PI_RTY_GET_STATUS:
-		n64pi_log_put(0);
+		n64pi_log_put(req->type << 28);
 		n64pi_log_put(0);
 		n64pi_log_put(0);
 		break;
