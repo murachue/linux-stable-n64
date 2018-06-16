@@ -329,25 +329,40 @@ static void ed64_on_writedma_complete(struct n64pi_request *req)
 static int ed64_request_writetocart_async(struct uart_port *port)
 {
 	struct ed64_private *ed64 = (struct ed64_private *)port->private_data;
-	struct n64pi_request *pireq;
+	struct list_head reqs;
 
-	pireq = n64pi_alloc_request(GFP_KERNEL);
-	if (!pireq) {
+	INIT_LIST_HEAD(&reqs);
+	if (!ed64_enable(&reqs)) {
 		return 0;
 	}
+	{
+		struct n64pi_request *pireq;
 
-	pireq->type = N64PI_RTY_R2C_DMA;
-	pireq->ram_vaddress = ed64->xmitbuf;
-	pireq->cart_address = ed64->cartbase;
-	pireq->length = 256; // TODO variable for shorter DMA time? but it is small...
-	pireq->on_complete = ed64_on_writedma_complete;
-	pireq->on_error = n64pi_free_request; // TODO poll_state to POLL_NONE is required
-	pireq->cookie = port;
+		pireq = n64pi_alloc_request(GFP_KERNEL);
+		if (!pireq) {
+			// TODO free reqs
+			return 0;
+		}
+
+		pireq->type = N64PI_RTY_R2C_DMA;
+		pireq->ram_vaddress = ed64->xmitbuf;
+		pireq->cart_address = ed64->cartbase;
+		pireq->length = 256; // TODO variable for shorter DMA time? but it is small...
+		pireq->on_complete = ed64_on_writedma_complete;
+		pireq->on_error = n64pi_free_request; // TODO poll_state to POLL_NONE is required
+		pireq->cookie = port;
+
+		list_add_tail(&pireq->node, &reqs);
+	}
+	if (!ed64_disable(&reqs)) {
+		// TODO free reqs
+		return 0;
+	}
 
 	// we are Ram2Cart PI DMA, don't disturb n64pi by polling ed64 status.
 	ed64->poll_state = POLL_PIDMA;
 
-	n64pi_request_async(ed64->pi, pireq);
+	n64pi_many_request_async(ed64->pi, &reqs);
 
 	return 1;
 }
@@ -774,10 +789,11 @@ static void ed64_status(struct uart_port *port)
  */
 static void ed64_poll(unsigned long unused)
 {
-	if(enabled) {
+	// note: always-polling required for console write...
+	//if(enabled) {
 		// polling status is the beginning of everything.
 		ed64_status(&port);
-	}
+	//}
 
 	// re-schedule next polling
 	mod_timer(&ed64_timer, jiffies + ED64_POLL_DELAY);
@@ -974,20 +990,14 @@ static void ed64_console_write(struct console *co, const char *buf, unsigned cou
 {
 	// TODO avoid reentrant with ed64_read/ed64_write??
 
-	// copied from serial_core.c:uart_write
-	// FIXME FIXME QUICKHACK: reuse the port's xmit circ_buf...!
+	// note: port is partially initialized... for write, private_data is enough here.
 	// TODO spinlock_irq port.lock
-	struct circ_buf *circ = &port.state->xmit;
-	while (1) {
-		int c = CIRC_SPACE_TO_END(circ->head, circ->tail, UART_XMIT_SIZE);
-		if (count < c)
-			c = count;
-		if (c <= 0) /* no more room */
-			break;
-		memcpy(circ->buf + circ->head, buf, c);
-		circ->head = (circ->head + c) & (UART_XMIT_SIZE - 1);
-		buf += c;
-		count -= c;
+	struct ed64_private *ed64 = port.private_data;
+	unsigned len = (255 < count) ? 255 : count; // min(count, 255)
+	ed64->xmitbuf[0] = len;
+	memcpy(ed64->xmitbuf + 1, buf, len);
+	if (!ed64_request_writetocart_async(&port)) {
+		// error... but putting message cause recursive write. do nothing.
 	}
 }
 
@@ -1045,10 +1055,6 @@ static int ed64_probe(struct platform_device *pdev)
 	struct ed64_private *ed64;
 
 	//dev_set_drvdata(&dev->dev, (void *)(long)port_count);
-	if(request_mem_region(0x08040000, 0x40, "ed64") == NULL) {
-		printk(KERN_ERR "Serial ED64: Unable to request ED64 regs mem region.\n");
-		return 1;
-	}
 
 	/* register the driver */
 	ed64_uart.cons = ED64_CONSOLE;
@@ -1063,7 +1069,7 @@ static int ed64_probe(struct platform_device *pdev)
 	ed64 = kmalloc(sizeof(struct ed64_private), GFP_KERNEL);
 	ed64->pi = dev_get_drvdata(pdev->dev.parent); /* TODO dev.parent->parent is n64pi?? ipaq-micro-leds */
 	ed64->poll_state = POLL_NONE;
-	ed64->cartbase = (0x04000000-0x0800); // TODO configurable or IORESOURCE_MEM/IO?
+	ed64->cartbase = (0x14000000-0x0800); // TODO configurable or IORESOURCE_MEM/IO?
 	ed64->status = 0;
 	ed64->xmitbuf[0] = 0;
 
