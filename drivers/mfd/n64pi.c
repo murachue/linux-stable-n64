@@ -198,14 +198,14 @@ next:
 		switch (req->type) {
 		case N64PI_RTY_ED64_ENABLE:
 			if (pi->ed64_enabled == 0) {
-				ed64_enable(pi->membase);
+				ed64_enable(pi->membase - 0x05000000U + 0x08040000); /* TODO hard coding offset!! */
 			}
 			// TODO INT_MAX check?
 			pi->ed64_enabled++;
 			break;
 		case N64PI_RTY_ED64_DISABLE:
 			if (pi->ed64_enabled == 1) {
-				ed64_disable(pi->membase);
+				ed64_disable(pi->membase - 0x05000000U + 0x08040000); /* TODO hard coding offset!! */
 			}
 			pi->ed64_enabled--;
 			if (pi->ed64_enabled < 0) {
