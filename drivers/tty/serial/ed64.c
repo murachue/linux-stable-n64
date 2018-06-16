@@ -179,20 +179,20 @@ static int ed64_enable(struct list_head *list)
 {
 	if (!ed64_able(N64PI_RTY_ED64_ENABLE, list)) {
 		pr_err("%s: could not allocate n64pi_request\n", __func__);
-		return 1;
+		return 0;
 	}
 
-	return 0;
+	return 1;
 }
 
 static int ed64_disable(struct list_head *list)
 {
 	if (!ed64_able(N64PI_RTY_ED64_DISABLE, list)) {
 		pr_err("%s: could not allocate n64pi_request\n", __func__);
-		return 1;
+		return 0;
 	}
 
-	return 0;
+	return 1;
 }
 
 /**
