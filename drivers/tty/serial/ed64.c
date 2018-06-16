@@ -80,7 +80,6 @@ static int ed64_dummyread(struct list_head *list)
 
 	req = n64pi_alloc_request(GFP_KERNEL);
 	if (!req) {
-		pr_err("%s: could not allocate n64pi_request\n", __func__);
 		return 0;
 	}
 	req->type = N64PI_RTY_C2R_WORD;
@@ -97,6 +96,7 @@ static unsigned int ed64_regread(unsigned int regoff, void (*on_complete)(struct
 	struct n64pi_request *req;
 
 	if (!ed64_dummyread(list)) { // dummy read required!!
+		pr_err("%s: could not allocate n64pi_request for dummy_read\n", __func__);
 		return 0;
 	}
 
@@ -127,6 +127,7 @@ static int ed64_regwrite(uint32_t value, unsigned int regoff, struct list_head *
 	struct n64pi_request *req;
 
 	if (!ed64_dummyread(list)) { // dummy read required!!
+		pr_err("%s: could not allocate n64pi_request for dummy_read\n", __func__);
 		return 0;
 	}
 
