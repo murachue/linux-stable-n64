@@ -297,6 +297,16 @@ static void ed64_on_writepoll_complete(struct n64pi_request *req)
 		return;
 	}
 
+	{
+		// FIXME reusing ed64_disable brings list_head.
+		struct list_head reqs;
+		INIT_LIST_HEAD(&reqs);
+		if (!ed64_disable(&reqs)) {
+			// TODO free reqs
+		}
+		n64pi_many_request_async(ed64->pi, &reqs);
+	}
+
 	// ED64 DMA is done.
 	ed64->poll_state = POLL_NONE;
 }
@@ -345,10 +355,6 @@ static void ed64_on_writedma_complete(struct n64pi_request *req)
 		// TODO free reqs
 		return;
 	}
-	if (!ed64_disable(&reqs)) {
-		// TODO free reqs
-		return;
-	}
 
 	// requests allocated; we are trying to Cart-to-USB DMA, be "polling for write"
 	ed64->poll_state = POLL_WRITING;
@@ -362,8 +368,10 @@ static int ed64_request_writetocart_async(struct uart_port *port, int enable_ed6
 	struct list_head reqs;
 
 	INIT_LIST_HEAD(&reqs);
-	if (!ed64_enable(&reqs)) {
-		return 0;
+	if (enable_ed64) {
+		if (!ed64_enable(&reqs)) {
+			return 0;
+		}
 	}
 	{
 		struct n64pi_request *pireq;
@@ -566,29 +574,45 @@ static void ed64_on_readpoll_complete(struct n64pi_request *req)
 	// ED64 DMA is done.
 	// Get ED64 ROM rx buffer
 
-	// we are trying to DMA from cart to ram...
-	ed64->poll_state = POLL_PIDMA;
+	// reset for easy error handling.
+	ed64->poll_state = POLL_NONE;
 
 	// note: no need to ed64_enable for cart read
 	{
-		struct n64pi_request *pireq;
+		struct list_head reqs;
 
-		pireq = n64pi_alloc_request(GFP_KERNEL);
-		if (!pireq) {
+		INIT_LIST_HEAD(&reqs);
+
+		if (!ed64_disable(&reqs)) {
 			pr_err("%s: can't allocate n64pi_request for read rx\n", __func__);
-			// oops... give up rx. recover at better.
-			ed64->poll_state = POLL_NONE;
+			// oops... give up rx.
 			return;
 		}
 
-		pireq->type = N64PI_RTY_C2R_DMA;
-		pireq->cart_address = 0x10000000 + ed64->rombase;
-		pireq->ram_vaddress = ed64->xmitbuf;
-		pireq->length = 256;
-		pireq->on_complete = ed64_on_readdma_complete;
-		pireq->on_error = n64pi_free_request; // TODO poll_state to POLL_NONE is required
-		pireq->cookie = port;
-		n64pi_request_async(ed64->pi, pireq);
+		{
+			struct n64pi_request *pireq;
+			pireq = n64pi_alloc_request(GFP_KERNEL);
+			if (!pireq) {
+				pr_err("%s: can't allocate n64pi_request for read rx\n", __func__);
+				// oops... give up rx.
+				// TODO free reqs
+				return;
+			}
+
+			pireq->type = N64PI_RTY_C2R_DMA;
+			pireq->cart_address = 0x10000000 + ed64->rombase;
+			pireq->ram_vaddress = ed64->xmitbuf;
+			pireq->length = 256;
+			pireq->on_complete = ed64_on_readdma_complete;
+			pireq->on_error = n64pi_free_request; // TODO poll_state to POLL_NONE is required
+			pireq->cookie = port;
+			list_add_tail(&pireq->node, &reqs);
+		}
+
+		// we are trying to DMA from cart to ram...
+		ed64->poll_state = POLL_PIDMA;
+
+		n64pi_many_request_async(ed64->pi, &reqs);
 	}
 }
 
@@ -625,10 +649,6 @@ static void ed64_read(struct uart_port *port)
 		return;
 	}
 	if (!ed64_regread(0x04, ed64_on_readpoll_complete, port, &reqs)) {
-		// TODO free reqs
-		return;
-	}
-	if (!ed64_disable(&reqs)) {
 		// TODO free reqs
 		return;
 	}
