@@ -81,7 +81,6 @@ static unsigned int ed64_regread(unsigned int regoff, void (*on_complete)(struct
 	list_add_tail(&req->node, list);
 	return 1;
 }
-#endif
 
 static int ed64_regwrite(uint32_t value, unsigned int regoff, struct list_head *list)
 {
@@ -113,16 +112,7 @@ static int ed64_regwrite(uint32_t value, unsigned int regoff, struct list_head *
 	list_add_tail(&req->node, list);
 	return 1;
 }
-
-static int ed64_enable(struct list_head *list)
-{
-	return ed64_regwrite(0x1234, 0x20, list);
-}
-
-static int ed64_disable(struct list_head *list)
-{
-	return ed64_regwrite(0, 0x20, list);
-}
+#endif
 
 static bool hd_end_request(int err, unsigned int bytes)
 {
@@ -308,6 +298,19 @@ static void write_ed64_intr(struct n64pi_request *pireq)
 	} else {
 		/* XXX there are no way to verify? read again?? blocking??? */
 
+		// disable ED64regs for safety
+		{
+			struct n64pi_request *pireq;
+			if (!(pireq = n64pi_alloc_request(GFP_NOIO))) {
+				pr_err("%s: can't alloc n64pi_request for disabling ed64regs\n", hd_req->rq_disk->disk_name);
+			} else {
+				pireq->type = N64PI_RTY_ED64_DISABLE;
+				pireq->on_complete = n64pi_free_request;
+				pireq->on_error = n64pi_free_request;
+				n64pi_request_async(pi, pireq);
+			}
+		}
+
 		/* acking issued blocks for kernel */
 		/* note: I am called from hd_interrupt, it locks queue. __blk_end_request requires that. */
 		if (!__blk_end_request(hd_req, 0, blk_rq_cur_bytes(hd_req))) {
@@ -433,11 +436,19 @@ repeat:
 
 				INIT_LIST_HEAD(&reqs);
 
-				if (!ed64_enable(&reqs)) {
+				pireq = n64pi_alloc_request(GFP_NOIO);
+				if (!pireq) {
+					pr_err("%s: could not allocate n64pi_request (%d)\n", req->rq_disk->disk_name, __LINE__);
+					// TODO free reqs
 					hd_req = NULL;
 					hd_end_request_entire(-ENOMEM);
 					break;
 				}
+				pireq->type = N64PI_RTY_ED64_ENABLE;
+				pireq->on_complete = n64pi_free_request;
+				pireq->on_error = n64pi_free_request;
+				//pireq->cookie = NULL;
+				list_add_tail(&pireq->node, &reqs);
 
 				if (!ed64_dummyread(&reqs)) { // dummyread for r2c DMA
 					// TODO free reqs
@@ -478,14 +489,6 @@ repeat:
 				pireq->on_error = n64pi_free_request;
 				//pireq->cookie = NULL;
 				list_add_tail(&pireq->node, &reqs);
-
-				/* enqueue disabling now, or tty may be enqueue while DMAing, wedge as result, potentially cause clashing ED64 reg state. */
-				if (!ed64_disable(&reqs)) {
-					// TODO free reqs
-					hd_req = NULL;
-					hd_end_request_entire(-ENOMEM);
-					break;
-				}
 
 				SET_HANDLER(write_ed64_intr);
 
