@@ -54,7 +54,7 @@ enum ed64_poll_state {
 struct ed64_private {
 	struct n64pi *pi; // n64pi arbitrator bound to the parent mfd device
 	enum ed64_poll_state poll_state; // poll (frequentry) for what
-	uint32_t cartbase; // ROM area that is used for rx/tx (2048 bytes align required by ED64 DMA!)
+	uint32_t rombase; // ROM area that is used for rx/tx (2048 bytes align required by ED64 DMA!)
 	uint32_t status; // last polled status
 	unsigned char __attribute((aligned(8))) xmitbuf[256]; // 255+1-bytes DMA buffer, NOTE: must be 8 bytes aligned (required by PI DMA)
 };
@@ -304,7 +304,7 @@ static void ed64_on_writedma_complete(struct n64pi_request *req)
 		// TODO free reqs
 		return;
 	}
-	if (!ed64_regwrite(ed64->cartbase / 2048, 0x0c, &reqs)) { // dmaaddr in 2048bytes
+	if (!ed64_regwrite(ed64->rombase / 2048, 0x0c, &reqs)) { // dmaaddr in 2048bytes
 		// TODO free reqs
 		return;
 	}
@@ -347,7 +347,7 @@ static int ed64_request_writetocart_async(struct uart_port *port)
 
 		pireq->type = N64PI_RTY_R2C_DMA;
 		pireq->ram_vaddress = ed64->xmitbuf;
-		pireq->cart_address = ed64->cartbase;
+		pireq->cart_address = 0x10000000 + ed64->rombase;
 		pireq->length = 256; // TODO variable for shorter DMA time? but it is small...
 		pireq->on_complete = ed64_on_writedma_complete;
 		pireq->on_error = n64pi_free_request; // TODO poll_state to POLL_NONE is required
@@ -557,7 +557,7 @@ static void ed64_on_readpoll_complete(struct n64pi_request *req)
 		}
 
 		pireq->type = N64PI_RTY_C2R_DMA;
-		pireq->cart_address = ed64->cartbase;
+		pireq->cart_address = 0x10000000 + ed64->rombase;
 		pireq->ram_vaddress = ed64->xmitbuf;
 		pireq->length = 256;
 		pireq->on_complete = ed64_on_readdma_complete;
@@ -591,7 +591,7 @@ static void ed64_read(struct uart_port *port)
 		// TODO free reqs
 		return;
 	}
-	if (!ed64_regwrite(ed64->cartbase / 2048, 0x0c, &reqs)) { // dmaaddr in 2048bytes
+	if (!ed64_regwrite(ed64->rombase / 2048, 0x0c, &reqs)) { // dmaaddr in 2048bytes
 		// TODO free reqs
 		return;
 	}
@@ -1070,7 +1070,7 @@ static int ed64_probe(struct platform_device *pdev)
 	ed64 = kmalloc(sizeof(struct ed64_private), GFP_KERNEL);
 	ed64->pi = dev_get_drvdata(pdev->dev.parent); /* TODO dev.parent->parent is n64pi?? ipaq-micro-leds */
 	ed64->poll_state = POLL_NONE;
-	ed64->cartbase = (0x14000000-0x0800); // TODO configurable or IORESOURCE_MEM/IO?
+	ed64->rombase = (0x04000000-0x0800); // TODO configurable or IORESOURCE_MEM/IO?
 	ed64->status = 0;
 	ed64->xmitbuf[0] = 0;
 
