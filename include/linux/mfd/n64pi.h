@@ -22,6 +22,8 @@ enum n64pi_request_type { /* request types */
 	N64PI_RTY_R2C_DMA, /* 64bit*n ram to cart */
 	N64PI_RTY_RESET, /* reset the PI */
 	N64PI_RTY_GET_STATUS, /* get the PI status (no write on PI registers) */
+	N64PI_RTY_ED64_ENABLE, /* enables ED64 regs */
+	N64PI_RTY_ED64_DISABLE, /* disables ED64 regs if this is a last ena-dis pair */
 };
 
 struct n64pi_request { /* represents a PI command request */

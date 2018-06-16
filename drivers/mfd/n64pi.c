@@ -43,6 +43,7 @@ struct n64pi { /* represents the driver status of the PI device */
 	spinlock_t lock; /* is a lock for this state container */
 	struct list_head queue; /* is a request queue */
 	struct n64pi_request *curreq; /* is a current processing request */
+	int ed64_enabled; /* holds current ED64 regs enabled count */
 
 	/* TODO move to n64pi_request? but it is bloating a 32bit word more... */
 	dma_addr_t curbusaddr; /* holds mapped device address for DMA (valid only while DMAing for curreq) */
@@ -80,6 +81,8 @@ static void n64pi_log_req(struct n64pi_request *req)
 		break;
 	case N64PI_RTY_RESET:
 	case N64PI_RTY_GET_STATUS:
+	case N64PI_RTY_ED64_ENABLE:
+	case N64PI_RTY_ED64_DISABLE:
 		n64pi_log_put(req->type << 28);
 		n64pi_log_put(0);
 		n64pi_log_put(0);
@@ -87,6 +90,35 @@ static void n64pi_log_req(struct n64pi_request *req)
 	}
 }
 #endif
+
+static void ed64_dummyread(void __iomem *membase)
+{
+	__raw_readl(membase + 0x00);
+}
+
+/*
+static unsigned int ed64_regread(void __iomem *membase, unsigned int regoff)
+{
+	ed64_dummyread(membase); // dummy read required!!
+	return __raw_readl(membase + regoff);
+}
+*/
+
+static void ed64_regwrite(void __iomem *membase, unsigned int value, unsigned int regoff)
+{
+	ed64_dummyread(membase); // dummy read required!!
+	__raw_writel(value, membase + regoff);
+}
+
+static void ed64_enable(void __iomem *membase)
+{
+	ed64_regwrite(membase, 0x1234, 0x20);
+}
+
+static void ed64_disable(void __iomem *membase)
+{
+	ed64_regwrite(membase, 0, 0x20);
+}
 
 static void do_one_request(struct n64pi *pi)
 {
@@ -146,6 +178,36 @@ next:
 			break;
 		case N64PI_RTY_R2C_WORD:
 			__raw_writel(req->value, pi->membase + req->cart_address - 0x05000000U); /* TODO hard coding offset!! */
+			break;
+		default: BUG(); /* FIXME compiler! */
+		}
+
+		req->status = __raw_readl(pi->regbase + REG_STATUS);
+		req->on_complete(req); /* note: I give you req... free that if you want! */
+
+		spin_lock_irqsave(&pi->lock, flags);
+		pi->curreq = NULL; /* forget after calling on_complete to avoid nested request in on_complete. */
+		goto next;
+	// TODO only for ED64-carts, check it and call on_error.
+	case N64PI_RTY_ED64_ENABLE:
+	case N64PI_RTY_ED64_DISABLE:
+		switch (req->type) {
+		case N64PI_RTY_ED64_ENABLE:
+			if (pi->ed64_enabled == 0) {
+				ed64_enable(pi->membase);
+			}
+			// TODO INT_MAX check?
+			pi->ed64_enabled++;
+			break;
+		case N64PI_RTY_ED64_DISABLE:
+			if (pi->ed64_enabled == 1) {
+				ed64_disable(pi->membase);
+			}
+			pi->ed64_enabled--;
+			if (pi->ed64_enabled < 0) {
+				dev_err(pi->dev, "too many ED64 disable request; reset count to 0\n");
+				pi->ed64_enabled = 0;
+			}
 			break;
 		default: BUG(); /* FIXME compiler! */
 		}
