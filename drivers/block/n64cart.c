@@ -31,7 +31,7 @@ static void *debug_head512 = NULL;
 #define SET_HANDLER(x) \
 	do { do_hd = (x); } while(0)
 
-/* TODO merge with ed64tty */
+// TODO merge with ed64tty
 static int ed64_dummyread(struct list_head *list)
 {
 	struct n64pi_request *req;
@@ -50,13 +50,38 @@ static int ed64_dummyread(struct list_head *list)
 	return 1;
 }
 
-/*
-static unsigned int ed64_regread(unsigned int regoff)
+#if 0
+static unsigned int ed64_regread(unsigned int regoff, void (*on_complete)(struct n64pi_request *req), void *cookie, struct list_head *list)
 {
-	ed64_dummyread(); // dummy read required!!
-	return __raw_readl((void*)(0xA8040000 + regoff));
+	struct n64pi_request *req;
+
+	if (!ed64_dummyread(list)) { // dummy read required!!
+		pr_err("%s: could not allocate n64pi_request for dummy_read\n", __func__);
+		return 0;
+	}
+
+	req = n64pi_alloc_request(GFP_KERNEL);
+	if (!req) {
+		pr_err("%s: could not allocate n64pi_request\n", __func__);
+
+		{
+			struct n64pi_request *pireq_dummyread;
+			pireq_dummyread = list_last_entry(list, struct n64pi_request, node);
+			list_del(&pireq_dummyread->node);
+			kfree(pireq_dummyread);
+		}
+
+		return 0;
+	}
+	req->type = N64PI_RTY_C2R_WORD;
+	req->cart_address = 0x08040000 + regoff;
+	req->on_complete = on_complete;
+	req->on_error = n64pi_free_request;
+	req->cookie = cookie;
+	list_add_tail(&req->node, list);
+	return 1;
 }
-*/
+#endif
 
 static int ed64_regwrite(uint32_t value, unsigned int regoff, struct list_head *list)
 {
@@ -268,6 +293,7 @@ static void write_ed64_intr(struct n64pi_request *pireq)
 
 	if((status & 7) != 0) {
 		pr_err("%s: PI write error status=%u for %ld+%Xh; retrying\n", hd_req->rq_disk->disk_name, status, blk_rq_pos(hd_req), blk_rq_cur_bytes(hd_req));
+		// reset before retrying
 		{
 			struct n64pi_request *pireq;
 			if (!(pireq = n64pi_alloc_request(GFP_NOIO))) {
@@ -364,7 +390,6 @@ repeat:
 	if (req->cmd_type == REQ_TYPE_FS) {
 		switch (rq_data_dir(req)) {
 		case READ:
-			SET_HANDLER(read_intr);
 			if(((unsigned int)pcurbuf & 7) != 0) {
 				pr_err("%s: buffer not aligned 8bytes: %p\n", req->rq_disk->disk_name, pcurbuf);
 			}
@@ -386,6 +411,9 @@ repeat:
 				pireq->on_complete = cart_on_complete;
 				pireq->on_error = n64pi_free_request;
 				//pireq->cookie = NULL;
+
+				SET_HANDLER(read_intr);
+
 				n64pi_request_async(pi, pireq);
 			}
 			break;
@@ -394,7 +422,8 @@ repeat:
 #if 0
 			hd_end_request_entire(-EROFS);
 #else
-			SET_HANDLER(write_ed64_intr);
+			// TODO test ED64 DMA before write?
+
 			if(((unsigned int)pcurbuf & 7) != 0) {
 				pr_err("%s: buffer not aligned 8bytes: %p\n", req->rq_disk->disk_name, pcurbuf);
 			}
@@ -455,6 +484,7 @@ repeat:
 					hd_end_request_entire(-ENOMEM);
 					break;
 				}
+				SET_HANDLER(write_ed64_intr);
 
 				n64pi_many_request_async(pi, &reqs);
 			}
