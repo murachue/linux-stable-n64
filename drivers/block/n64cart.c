@@ -446,6 +446,7 @@ repeat:
 					break;
 				}
 
+				/*
 				pireq = n64pi_alloc_request(GFP_NOIO);
 				if (!pireq) {
 					pr_err("%s: could not allocate n64pi_request (%d)\n", req->rq_disk->disk_name, __LINE__);
@@ -459,6 +460,7 @@ repeat:
 				pireq->on_error = n64pi_free_request;
 				//pireq->cookie = NULL;
 				list_add_tail(&pireq->node, &reqs);
+				*/
 
 				pireq = n64pi_alloc_request(GFP_NOIO);
 				if (!pireq) {
@@ -484,6 +486,7 @@ repeat:
 					hd_end_request_entire(-ENOMEM);
 					break;
 				}
+
 				SET_HANDLER(write_ed64_intr);
 
 				n64pi_many_request_async(pi, &reqs);
