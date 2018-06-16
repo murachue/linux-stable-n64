@@ -970,60 +970,25 @@ static int ed64_poll_get_char(struct uart_port *port)
 #endif
 
 #ifdef CONFIG_SERIAL_ED64_CONSOLE
-static void ed64_console_write(struct console *co, const char *_s, unsigned count)
+static void ed64_console_write(struct console *co, const char *buf, unsigned count)
 {
 	// TODO avoid reentrant with ed64_read/ed64_write??
 
-	const unsigned char *s = _s;
-	unsigned long flags;
-	local_irq_save(flags); // disable int to avoid clashing with n64cart... XXX
-
-	// TODO PI arbitrator... do not directly access to MMIO here...
-
-	// wait for PI dma done (maybe conflict with CPU R/W)
-	while(__raw_readl((__iomem void *)0xA4600010) & 3) { udelay(1); } // XXX argh!! touching non-requested iomem!!
-
-	ed64_enable(&port);
-
-	// Nintendo64 PI requires 32bit access.
-	// supposed big-endian.
-	while(0 < count) {
-		unsigned cnt = count < 255 ? count : 255; // min(count, 255)
-
-		unsigned buf = cnt << 0;
-		unsigned i = 1; // 1 byte (=cnt) already buffered
-		while(i < 256) {
-			buf <<= 8;
-			if(0 < cnt) {
-				buf |= *s++;
-				count--;
-				cnt--;
-			}
-			i++;
-			if(i % 4 == 0) {
-				ed64_dummyread(&port); // dummy read required!!
-				__raw_writel(buf, (__iomem unsigned *)(0xB4000000 - 0x0800 + i - 4)); // XXX argh!! touching non-requested iomem!!
-				buf = 0;
-				if(cnt == 0) {
-					break;
-				}
-			}
-		}
-
-		// wait ED64 dma
-		while(ed64_regread(&port, 0x04) & 1) { udelay(1); }
-		// transfer cart2usb
-		// TODO txe# should be tested
-		ed64_regwrite(512/512 - 1, &port, 0x08); // dmalen in 512bytes - 1
-		ed64_regwrite((0x04000000-0x0800)/0x800, &port, 0x0c); // dmaaddr in 2048bytes TODO configurable but there are no "*port"
-		ed64_regwrite(4, &port, 0x14); // dmacfg = 4(ram2fifo)
-		// wait ED64 dma
-		while(ed64_regread(&port, 0x04) & 1) { udelay(1); }
+	// copied from serial_core.c:uart_write
+	// FIXME FIXME QUICKHACK: reuse the port's xmit circ_buf...!
+	// TODO spinlock_irq port.lock
+	struct circ_buf *circ = &port.state->xmit;
+	while (1) {
+		int c = CIRC_SPACE_TO_END(circ->head, circ->tail, UART_XMIT_SIZE);
+		if (count < c)
+			c = count;
+		if (c <= 0) /* no more room */
+			break;
+		memcpy(circ->buf + circ->head, buf, c);
+		circ->head = (circ->head + c) & (UART_XMIT_SIZE - 1);
+		buf += c;
+		count -= c;
 	}
-
-	ed64_disable(&port);
-
-	local_irq_restore(flags);
 }
 
 static int ed64_console_setup(struct console *co, char *options)
