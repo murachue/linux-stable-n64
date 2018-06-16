@@ -156,10 +156,13 @@ next:
 
 	/* PI must be steady (or other driver manipulates PI!?) */
 	/* but if current request is RESET, it is expected. (so callee decided issue a RESET request.) */
-	if ((__raw_readl(pi->regbase + REG_STATUS) & 7) && (req->type != N64PI_RTY_RESET)) {
-		/* unexpected busy or has an error, reset PI to abort it (and clear error bit) */
-		dev_err(pi->dev, "Unexpected device busy or has error (cmd=%d); resetting.\n", req->type);
-		__raw_writel(0x00000003, pi->regbase + REG_STATUS);
+	{
+		uint32_t status = __raw_readl(pi->regbase + REG_STATUS);
+		if ((status & 7) && (req->type != N64PI_RTY_RESET)) {
+			/* unexpected busy or has an error, reset PI to abort it (and clear error bit) */
+			dev_err(pi->dev, "Unexpected device busy or has error (status=%x, req=%d); resetting.\n", status, req->type);
+			__raw_writel(0x00000003, pi->regbase + REG_STATUS);
+		}
 	}
 
 	switch (req->type) {
