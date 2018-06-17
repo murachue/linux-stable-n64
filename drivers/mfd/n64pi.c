@@ -28,7 +28,7 @@
 #include <linux/completion.h>
 #include <linux/mfd/n64pi.h>
 
-#define DEBUG_REQLOG
+//#define DEBUG_REQLOG
 
 #define REG_DRAMADDR 0x00
 #define REG_CARTADDR 0x04
