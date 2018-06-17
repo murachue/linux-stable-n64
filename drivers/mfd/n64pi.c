@@ -292,7 +292,7 @@ extern void stub(void); stub();
 		}
 
 		__raw_writel(req->cart_address, pi->regbase + REG_CARTADDR);
-		__raw_writel(pi->curbusaddr, pi->regbase + REG_DRAMADDR); // TODO not vaddr but devaddr(paddr)
+		__raw_writel(pi->curbusaddr, pi->regbase + REG_DRAMADDR);
 		mb();
 		switch (req->type) {
 		case N64PI_RTY_C2R_DMA:
