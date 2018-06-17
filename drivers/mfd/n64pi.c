@@ -32,8 +32,8 @@
 
 #define REG_DRAMADDR 0x00
 #define REG_CARTADDR 0x04
-#define REG_CART2DRAM 0x08
-#define REG_DRAM2CART 0x0C
+#define REG_DRAM2CART 0x08
+#define REG_CART2DRAM 0x0C
 #define REG_STATUS 0x10
 
 struct n64pi { /* represents the driver status of the PI device */
@@ -281,13 +281,14 @@ next:
 			if(__raw_readl(pi->regbase + REG_STATUS) & 4) {
 extern void stub(void); stub();
 			}
-#endif
+#elif 0
 			if (!pi->ed64_enabled) {
 extern void stub(void); stub();
 			}
 			ed64_dummyread(pi->membase - 0x05000000U + 0x08040000);
 			__raw_writel(0x00000003, pi->regbase + REG_STATUS);
 			while(__raw_readl(pi->regbase + REG_STATUS) & 3);
+#endif
 		}
 
 		__raw_writel(req->cart_address, pi->regbase + REG_CARTADDR);
