@@ -369,24 +369,6 @@ static int ed64_request_writetocart_async(struct uart_port *port)
 		pr_err("%s: could not allocate n64pi_request for enable ed64regs\n", __func__);
 		return 0;
 	}
-	if (!ed64_dummyread(&reqs)) {
-		pr_err("%s: could not allocate n64pi_request for dummy_read\n", __func__);
-		return 0;
-	}
-	{
-		struct n64pi_request *pireq;
-		pireq = n64pi_alloc_request(GFP_KERNEL);
-		if (!pireq) {
-			pr_err("%s: could not allocate n64pi_request (%d)\n", __func__, __LINE__);
-			// TODO free reqs
-			return 0;
-		}
-		pireq->type = N64PI_RTY_RESET;
-		pireq->on_complete = n64pi_free_request;
-		pireq->on_error = n64pi_free_request;
-		//pireq->cookie = NULL;
-		list_add_tail(&pireq->node, &reqs);
-	}
 	{
 		struct n64pi_request *pireq;
 

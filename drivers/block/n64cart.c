@@ -31,7 +31,8 @@ static void *debug_head512 = NULL;
 #define SET_HANDLER(x) \
 	do { do_hd = (x); } while(0)
 
-// TODO merge with ed64tty
+// TODO merge with ed64tty, or remove completely
+#if 0
 static int ed64_dummyread(struct list_head *list)
 {
 	struct n64pi_request *req;
@@ -50,7 +51,6 @@ static int ed64_dummyread(struct list_head *list)
 	return 1;
 }
 
-#if 0
 static unsigned int ed64_regread(unsigned int regoff, void (*on_complete)(struct n64pi_request *req), void *cookie, struct list_head *list)
 {
 	struct n64pi_request *req;
@@ -448,29 +448,6 @@ repeat:
 					hd_end_request_entire(-ENOMEM);
 					break;
 				}
-
-				if (!ed64_dummyread(&reqs)) { // dummyread for r2c DMA
-					// TODO free reqs
-					hd_req = NULL;
-					hd_end_request_entire(-ENOMEM);
-					break;
-				}
-
-				/*
-				pireq = n64pi_alloc_request(GFP_NOIO);
-				if (!pireq) {
-					pr_err("%s: could not allocate n64pi_request (%d)\n", req->rq_disk->disk_name, __LINE__);
-					// TODO free reqs
-					hd_req = NULL;
-					hd_end_request_entire(-ENOMEM);
-					break;
-				}
-				pireq->type = N64PI_RTY_RESET;
-				pireq->on_complete = n64pi_free_request;
-				pireq->on_error = n64pi_free_request;
-				//pireq->cookie = NULL;
-				list_add_tail(&pireq->node, &reqs);
-				*/
 
 				pireq = n64pi_alloc_request(GFP_NOIO);
 				if (!pireq) {
