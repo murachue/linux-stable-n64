@@ -588,6 +588,7 @@ static void ed64_on_readpoll_complete(struct n64pi_request *req)
 
 	if (ed64status & 1) {
 		// ED64 DMA is still running, poll that later (at timer handler).
+		// TODO this is unexpected status?
 		return;
 	}
 
