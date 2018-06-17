@@ -55,8 +55,8 @@ unsigned n64pi_logi = 0;
 
 static void n64pi_log_put(unsigned v)
 {
-	n64pi_log[n64pi_logi] = v;
-	n64pi_logi = (n64pi_logi + 1) % (sizeof(n64pi_log)/sizeof(*n64pi_log));
+	n64pi_log[n64pi_logi % (sizeof(n64pi_log)/sizeof(*n64pi_log))] = v;
+	n64pi_logi++;
 }
 
 static void n64pi_log_req(const struct n64pi *pi, const struct n64pi_request *req)
