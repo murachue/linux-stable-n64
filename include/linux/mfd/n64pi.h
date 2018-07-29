@@ -15,75 +15,45 @@
 #include <linux/dma-mapping.h>
 #include <linux/gfp.h>
 
-enum n64pi_request_type { /* request types */
-	N64PI_RTY_C2R_WORD, /* 32bit cart to ram */
-	N64PI_RTY_R2C_WORD, /* 32bit ram to cart */
-	N64PI_RTY_C2R_DMA, /* 64bit*n cart to ram */
-	N64PI_RTY_R2C_DMA, /* 64bit*n ram to cart */
-	N64PI_RTY_RESET, /* reset the PI */
-	N64PI_RTY_GET_STATUS, /* get the PI status (no write on PI registers) */
-	N64PI_RTY_ED64_ENABLE, /* enables ED64 regs */
-	N64PI_RTY_ED64_DISABLE, /* disables ED64 regs if this is a last ena-dis pair */
-};
-
-struct n64pi_request { /* represents a PI command request */
-	struct list_head node; /* is connected to the queue if request gets queued */
-
-	enum n64pi_request_type type; /* means what this request want to do */
-	uint32_t cart_address; /* where (value|data at ram_vaddress) will be (read|written) */
-	uint32_t value; /* holds the value will be written/that was read (valid only if WORD request) */
-		/* TODO union with ram_vaddress? providing "value" for convenience. (no need to allocate a 32bit somewhere else.) */
-	void *ram_vaddress; /* points to the data will be DMA'd (valid only if DMA request), in virtual address. */
-	uint32_t length; /* to be transferred (valid only if DMA request) */
-
-	void (*on_complete)(struct n64pi_request *req); /* is called on completed this request, you must kfree or reuse req. (NOTE: this is called in interrupt context) */
-	void (*on_error)(struct n64pi_request *req); /* is called on callee program error while processing this request, you must kfree or reuse req. (NOTE: this including ENOMEM, you should to mind that case.) */
-	void *cookie; /* is a free field for on_complete. use for any you want. */
-
-	uint32_t status; /* holds the status on just after complete of this request. TODO consider passing this by on_complete argument to allow register passing. */
-};
-
 struct n64pi; /* private struct of driver */
 
-extern int
-n64pi_request_async(struct n64pi *pi, struct n64pi_request *req);
+typedef void (*n64pi_on_interrupt_t)(struct n64pi *pi, void *cookie, uint32_t status);
+
+#define N64PI_ERROR_SUCCESS    0
+#define N64PI_ERROR_ADDRESSING -1
+#define N64PI_ERROR_DMAMAP     -2
+#define N64PI_ERROR_PIDMA      -3
+#define N64PI_ERROR_BUSY       -4
 
 extern int
-n64pi_many_request_async(struct n64pi *pi, struct list_head *reqlist);
+n64pi_blocking_read_dma(struct n64pi *pi, void *ram_vaddr, uint32_t cart_addr, uint32_t length);
 
 extern int
-n64pi_wedge_request_async(struct n64pi *pi, struct n64pi_request *req);
+n64pi_nonblock_read_dma(struct n64pi *pi, void *ram_vaddr, uint32_t cart_addr, uint32_t length, n64pi_on_interrupt_t on_interrupt, void *cookie);
 
 extern int
-n64pi_request_sync(struct n64pi *pi, struct n64pi_request *req);
+n64pi_blocking_write_dma(struct n64pi *pi, uint32_t cart_addr, void *ram_vaddr, uint32_t length);
+
+extern int
+n64pi_nonblock_write_dma(struct n64pi *pi, uint32_t cart_addr, void *ram_vaddr, uint32_t length, n64pi_on_interrupt_t on_interrupt, void *cookie);
+
+/* TODO how about addressing error? but I don't want to store value into memory... introduce "value_on_error"? */
+extern uint32_t
+n64pi_blocking_read_word(struct n64pi *pi, uint32_t cart_addr);
+
+extern int
+n64pi_blocking_write_word(struct n64pi *pi, uint32_t cart_addr, uint32_t value);
 
 extern void
-n64pi_free_request(struct n64pi_request *req); /* provides convenience for on_error. */
+n64pi_reset(struct n64pi *pi);
 
-static inline struct n64pi_request *
-n64pi_alloc_request(gfp_t flags)
-{
-	struct n64pi_request *req;
+extern uint32_t
+n64pi_get_status(struct n64pi *pi);
 
-	req = kzalloc(sizeof(*req), flags);
-	if (!req) {
-		return NULL;
-	}
+extern int
+n64pi_blocking_ed64_enable(struct n64pi *pi);
 
-	INIT_LIST_HEAD(&req->node);
-
-	return req;
-}
-
-/* TODO
-extern struct n64pi_request *
-n64pi_getreq_c2rw(uint32_t cart_address, void *ram_vaddress, void (*on_complete)(struct n64pi_request *req), void (*on_error)(struct n64pi_request *req), void *cookie);
-extern struct n64pi_request *
-n64pi_getreq_r2cw(uint32_t cart_address, void *ram_vaddress, uint32_t value, void (*on_complete)(struct n64pi_request *req), void (*on_error)(struct n64pi_request *req), void *cookie);
-extern struct n64pi_request *
-n64pi_getreq_c2rd(uint32_t cart_address, void *ram_vaddress, uint32_t length, void (*on_complete)(struct n64pi_request *req), void (*on_error)(struct n64pi_request *req), void *cookie);
-extern struct n64pi_request *
-n64pi_getreq_r2cd(uint32_t cart_address, void *ram_vaddress, uint32_t length, void (*on_complete)(struct n64pi_request *req), void (*on_error)(struct n64pi_request *req), void *cookie);
-*/
+extern int
+n64pi_blocking_ed64_disable(struct n64pi *pi);
 
 #endif /* _MFD_N64PI_H_ */
