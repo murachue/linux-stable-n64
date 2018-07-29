@@ -1633,6 +1633,7 @@ config SERIAL_ED64
 	tristate "EverDrive-64 v3 pseudo serial support"
 	depends on NINTENDO64
 	select SERIAL_CORE
+	select MFD_NINTENDO64_PI
 	default n
 	---help---
 	  Saying Y here will enable the EverDrive-64 v3 pseudo serial driver.

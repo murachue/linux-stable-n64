@@ -550,6 +550,7 @@ config BLK_DEV_RSXX
 config NINTENDO64_CART
 	bool "Nintendo 64 Cartridge"
 	depends on NINTENDO64
+	select MFD_NINTENDO64_PI
 	help
 	  Say Y here if you want to use cartridge as a block device.
 	  This driver provides it as 512-bytes size sectors.
