@@ -25,7 +25,7 @@ static struct request_queue *hd_queue;
 static struct request *hd_req;
 static void (*do_hd)(struct n64pi_request *pireq) = NULL;
 #ifdef N64CART_VERIFY_READ
-static void *debug_head512 = NULL;
+static void *debug_head512 = NULL; /* TODO remove "512" (it is not 512 bytes verify anymore...) */
 #endif
 
 #define SET_HANDLER(x) \
@@ -184,56 +184,13 @@ static void read_intr(struct n64pi_request *pireq)
 			}
 		}
 	} else {
-//pr_info("%s: read: %ld+%Xh=>%08x\n", hd_req->rq_disk->disk_name, blk_rq_pos(hd_req), blk_rq_cur_bytes(hd_req), crc32_be(0, (void*)((unsigned int)bio_data(hd_req->bio) | 0xA0000000), blk_rq_cur_bytes(hd_req)));
-//{int s=512/*blk_rq_cur_bytes(hd_req)*/;unsigned char *p=(void*)((unsigned int)bio_data(hd_req->bio) | 0xA0000000),q[64*2+1],*r=q;while(s--){sprintf(r,"%02X",*p++);r+=2;if(s%64==0){pr_info("%s\n",q);r=q;}}}
-//{struct request *req=hd_req;void *b=kmalloc(512, GFP_KERNEL | GFP_NOIO);int s=512;unsigned char *p=b,q[64*2+1],*r=q;memcpy(b, (void*)((unsigned int)bio_data(req->bio) | 0xA0000000), 512);while(s--){sprintf(r,"%02X",*p++);r+=2;if(s%64==0){pr_info("%s\n",q);r=q;}};kfree(b);}
-#if 0
-{
-	int size = blk_rq_cur_bytes(hd_req);
-	int *buf = kmalloc(size, GFP_NOIO);
-	void *bbuf = (void*)((unsigned int)bio_data(hd_req->bio) | 0xA0000000);
-	//__asm("mtc0 %0,$19; mtc0 %1, $18" : : "r"(0), "r"((((unsigned int)bbuf + 0x10) & 0x1FFFfff8) | 1)); // Write watch to bio buf + 0x10 (="/dev/root")
-	__flush_cache_all();
-	memcpy(buf, bbuf, size);
-
-	if(0){
-		int s = 512;
-		char *p = bbuf, q[64*2+1], *r = q;
-		while(s--){
-			sprintf(r, "%02X", *p++);
-			r += 2;
-			if(s % 64 == 0) {
-				pr_info("%s\n",q);
-				r = q;
-			}
-		}
-	}
-	if(memcmp(buf, bbuf, size)) {
-		pr_err("n64cart: memcmp failed\n");
-		if(0){
-			int s = 512;
-			char *p = bbuf, q[64*2+1], *r = q;
-			while(s--){
-				sprintf(r, "%02X", *p++);
-				r += 2;
-				if(s % 64 == 0) {
-					pr_info("%s\n",q);
-					r = q;
-				}
-			}
-		}
-		panic("n64cart bio has broken");
-	}
-	kfree(buf);
-}
-#endif
-
 #ifdef N64CART_VERIFY_READ
 		// verify: QUICK DIRTY HACK.
 		// seeing cached area.
 		if(debug_head512 == NULL) {
 			debug_head512 = kmalloc(blk_rq_cur_bytes(hd_req), GFP_NOIO);
 			memcpy(debug_head512, bio_data(hd_req->bio), blk_rq_cur_bytes(hd_req));
+			// don't modify hd_req and fall-through: retry (for verify)
 		} else {
 			int r;
 			{
@@ -260,7 +217,9 @@ static void read_intr(struct n64pi_request *pireq)
 
 			if(r /*memcmp(debug_head512, bio_data(hd_req->bio), blk_rq_cur_bytes(hd_req)) != 0*/) {
 				pr_err("%s: debug %p <=> read %ld+%Xh verify failed; retrying\n", hd_req->rq_disk->disk_name, debug_head512, blk_rq_pos(hd_req), blk_rq_cur_bytes(hd_req));
+				// remember again
 				memcpy(debug_head512, bio_data(hd_req->bio), blk_rq_cur_bytes(hd_req));
+				// don't modify hd_req and fall-through: retry (for verify)
 			} else {
 				kfree(debug_head512);
 				debug_head512 = NULL;

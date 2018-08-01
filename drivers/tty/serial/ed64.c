@@ -391,6 +391,7 @@ static int ed64_request_writetocart_async(struct uart_port *port)
 	}
 	if (!ed64_disable(&reqs)) {
 		pr_err("%s: could not allocate n64pi_request for disable ed64regs\n", __func__);
+		// TODO free reqs
 		return 0;
 	}
 
