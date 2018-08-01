@@ -242,15 +242,15 @@ static void read_intr(struct n64pi_request *pireq)
 				const int atonce = 32;
 				char hexp[atonce*2+1], hexq[atonce*2+1];
 				while(0 < len) {
-					r = memcmp(p, q, atonce);
-					if(r) {
+					int rr = memcmp(p, q, atonce);
+					if(rr) {
 						int i;
 						for(i = 0; i < atonce; i++) {
 							sprintf(hexp + i * 2, "%02X", p[i]);
 							sprintf(hexq + i * 2, "%02X", q[i]);
 						}
 						pr_err("E+%03xh: %s %s\n", (unsigned)p - (unsigned)debug_head512, hexp, hexq);
-						//break;
+						r = 1; //break;
 					}
 					p += atonce;
 					q += atonce;
