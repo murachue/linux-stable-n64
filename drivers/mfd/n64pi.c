@@ -537,7 +537,6 @@ static irqreturn_t n64pi_isr(int irq, void *dev_id)
 	cookie = pi->on_interrupt_cookie;
 
 	pi->nonblock_op = NULL;
-	pi->on_interrupt = NULL;
 
 	spin_unlock(&pi->lock);
 
@@ -619,7 +618,6 @@ static int __init n64pi_probe(struct platform_device *pdev)
 
 	spin_lock_init(&pi->lock);
 	pi->nonblock_op = NULL;
-	pi->on_interrupt = NULL;
 	pi->ed64_enabled = 0;
 	platform_set_drvdata(pdev, pi);
 
