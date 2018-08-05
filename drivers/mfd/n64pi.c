@@ -50,39 +50,40 @@ struct n64pi { /* represents the driver status of the PI device */
 unsigned n64pi_log[4*1024];
 unsigned n64pi_logi = 0;
 
-static void n64pi_log_put(unsigned v)
-{
+static void
+n64pi_log_put(unsigned v) {
 	n64pi_log[n64pi_logi % (sizeof(n64pi_log)/sizeof(*n64pi_log))] = v;
 	n64pi_logi++;
 }
 #endif
 
-static void ed64_dummyread(void __iomem *membase)
-{
+static void
+ed64_dummyread(void __iomem *membase) {
 	__raw_readl(membase + 0x00);
 }
 
 /*
-static unsigned int ed64_regread(void __iomem *membase, unsigned int regoff)
+static unsigned int
+ed64_regread(void __iomem *membase, unsigned int regoff)
 {
 	ed64_dummyread(membase); // dummy read required!!
 	return __raw_readl(membase + regoff);
 }
 */
 
-static void ed64_regwrite(void __iomem *membase, unsigned int value, unsigned int regoff)
-{
+static void
+ed64_regwrite(void __iomem *membase, unsigned int value, unsigned int regoff) {
 	ed64_dummyread(membase); // dummy read required!!
 	__raw_writel(value, membase + regoff);
 }
 
-static void ed64_enable(void __iomem *membase)
-{
+static void
+ed64_enable(void __iomem *membase) {
 	ed64_regwrite(membase, 0x1234, 0x20);
 }
 
-static void ed64_disable(void __iomem *membase)
-{
+static void
+ed64_disable(void __iomem *membase) {
 	ed64_regwrite(membase, 0, 0x20);
 }
 
