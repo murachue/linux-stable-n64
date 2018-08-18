@@ -6,6 +6,7 @@
  * mainly for arbitrating their accesses.
  * Based on ipaq-micro.c.
  *
+ * TODO nonblocking DMA support (introduce queue? how about before_dma and on_interrupt(after_dma)?)
  * TODO support 1FD00000-7FFFffff (Cartridge domain 1 address 3)?
  *
  * This program is free software; you can redistribute it and/or modify
@@ -35,27 +36,9 @@ struct n64pi { /* represents the driver status of the PI device */
 	void __iomem *regbase; /* is a base virtual address of PI DMA registers (ie. 0xA4600000) */
 	void __iomem *membase; /* is a base virtual address of CPU word access to PI including SRAM/64DD/ROM area (ie. 0xA5000000) */
 	spinlock_t lock; /* is a lock for this state container */
+	int ongoing; /* holds boolean means n64pi is locked or not */
+	unsigned long flags; /* holds irq flags */
 	int ed64_enabled; /* holds current ED64 regs enabled count */
-
-	/* info about current ongoing DMA */
-	const char *nonblock_op; /* points to op (const)string that is currently running, or NULL if DMA is not running */
-	dma_addr_t curbusaddr; /* holds mapped device address for DMA (valid only while nonblock DMAing) */
-	uint32_t length; /* holds mapped DMA buffer length */
-	int is_write; /* holds DMA direction */
-	n64pi_on_interrupt_t on_interrupt; /* points to current nonblock request's callback, NULL if no nonblock request is on going. */
-	void *on_interrupt_cookie; /* holds cookie for on_interrupt callback */
-
-	/* info about queued operations; fixed-array for less memory usage, and its ok because limited sub-drivers, and it should queue only one per one driver. */
-	struct opqueue {
-		void *ram_vaddr;
-		uint32_t cart_addr;
-		uint32_t length;
-		n64pi_before_dma_t before_dma;
-		n64pi_on_interrupt_t on_interrupt;
-		void *cookie;
-		int is_write;
-	} opqueue[4];
-	uint32_t opqueue_len;
 };
 
 #ifdef DEBUG_REQLOG
@@ -192,18 +175,20 @@ dma(struct n64pi *pi, const char *op, void *ram_vaddr, uint32_t cart_addr, uint3
 	return N64PI_ERROR_SUCCESS;
 }
 
+#if 0 // keep for support nonblocking...
 static int
 get_intr_pending(struct n64pi *pi) {
 	/* FIXME ouch! touching non-PI region without ioremap!! */
 	/*       but no such bit in PI registers... */
 	return __raw_readl((void*)CKSEG1ADDR(0x04300008)) & (1 << 4);
 }
+#endif
 
 static int
 cleanup_dma(struct n64pi *pi, const char *op, dma_addr_t curbusaddr, uint32_t length, int is_write) {
 	dma_unmap_single(pi->dev, curbusaddr, length, is_write ? DMA_TO_DEVICE : DMA_FROM_DEVICE);
 
-	/* test DMA error TODO is this required? (error bit for request after DMA, not this DMA itself) */
+	/* test DMA error TODO is this required? (error bit is for last request, not this DMA itself) */
 	{
 		uint32_t status = __raw_readl(pi->regbase + REG_STATUS);
 		/* Make PI steady */
@@ -218,17 +203,22 @@ cleanup_dma(struct n64pi *pi, const char *op, dma_addr_t curbusaddr, uint32_t le
 	return N64PI_ERROR_SUCCESS;
 }
 
+static void
+ensure_beginned(struct n64pi *pi) {
+	if (pi->ongoing) {
+		return;
+	}
+
+	panic("n64pi sub device program error: something requested but not beginned");
+}
+
 static int
 blocking_dma(struct n64pi *pi, void *ram_vaddr, uint32_t cart_addr, uint32_t length, int is_write) {
 	int error;
-	unsigned long flags;
-	uint32_t status;
-	int intr_pending;
 	dma_addr_t curbusaddr;
-	n64pi_on_interrupt_t on_interrupt;
-	const char *op = is_write ? "b_w_d" : "b_r_d";
+	const char *op = is_write ? "w_d" : "r_d";
 
-	spin_lock_irqsave(&pi->lock, flags);
+	ensure_beginned(pi);
 
 #ifdef DEBUG_REQLOG
 	n64pi_log_put(jiffies);
@@ -240,174 +230,69 @@ blocking_dma(struct n64pi *pi, void *ram_vaddr, uint32_t cart_addr, uint32_t len
 	/* Wait until PI is busy ("blocking") */
 	block_until_pi_completion(pi);
 
-	/* remember status for potentially invoking nonblock on_interrupt */
-	intr_pending = get_intr_pending(pi);
 	/* Remember and make PI steady */
-	status = ensure_noerror(pi, op);
-
-	if ((error = dma(pi, op, ram_vaddr, cart_addr, length, &curbusaddr, is_write)) != N64PI_ERROR_SUCCESS) {
-		spin_unlock_irqrestore(&pi->lock, flags);
-		return error;
-	}
-
-	/* wait for DMA completion ("blocking") */
-	block_until_pi_completion(pi);
-
-	if ((error = cleanup_dma(pi, op, curbusaddr, length, is_write)) != N64PI_ERROR_SUCCESS) {
-		spin_unlock_irqrestore(&pi->lock, flags);
-		return error;
-	}
-
-	/* drop interrupt to avoid spurious interrupt */
-	if (get_intr_pending(pi)) {
-		__raw_writel(0x00000002, pi->regbase + REG_STATUS);
-	}
-
-	/* slurp on_interrupt to avoid double-call on just after spin_unlock. */
-	on_interrupt = pi->on_interrupt;
-	pi->on_interrupt = NULL;
-
-	spin_unlock_irqrestore(&pi->lock, flags);
-
-	/* emulate interrupt here (if it was). NOTE on_interrupt may be call n64pi_* that spinlocks, so pi->lock must be unlocked. */
-	if (on_interrupt && intr_pending) {
-		on_interrupt(pi, pi->on_interrupt_cookie, status);
-	}
-
-	return N64PI_ERROR_SUCCESS;
-}
-
-static int enqueue_op(struct n64pi *pi, void *ram_vaddr, uint32_t cart_addr, uint32_t length, n64pi_before_dma_t before_dma, n64pi_on_interrupt_t on_interrupt, void *cookie, int is_write) {
-	const char *op = is_write ? "n_w_d" : "n_r_d";
-
-	if (sizeof(pi->opqueue)/sizeof(pi->opqueue[0]) <= pi->opqueue_len) {
-		/* queue full */
-		dev_err(pi->dev, "%s: opqueue full; skipping! %p/%08X+%08X)\n", op, ram_vaddr, cart_addr, length);
-		return N64PI_ERROR_NOMEM;
-	}
-
-	/* enqueue */
-	{
-		struct opqueue * const opq = &pi->opqueue[pi->opqueue_len];
-		opq->ram_vaddr = ram_vaddr;
-		opq->cart_addr = cart_addr;
-		opq->length = length;
-		opq->before_dma = before_dma;
-		opq->on_interrupt = on_interrupt;
-		opq->cookie = cookie;
-		opq->is_write = is_write;
-	}
-	pi->opqueue_len++;
-
-	/* caller wants this */
-	return N64PI_ERROR_BUSY;
-}
-
-static int
-do_nonblock_dma(struct n64pi *pi, void *ram_vaddr, uint32_t cart_addr, uint32_t length, n64pi_before_dma_t before_dma, n64pi_on_interrupt_t on_interrupt, void *cookie, int is_write) {
-	int error;
-	const char *op = is_write ? "n_w_d" : "n_r_d";
-
-#ifdef DEBUG_REQLOG
-	n64pi_log_put(jiffies);
-	n64pi_log_put(((is_write ? 104 : 103) << 28) | length);
-	n64pi_log_put(cart_addr);
-	n64pi_log_put((unsigned)ram_vaddr);
-#endif
-
-	/* Make PI steady */
 	(void)ensure_noerror(pi, op);
 
-	before_dma(pi, cookie);
-
-	if ((error = dma(pi, op, ram_vaddr, cart_addr, length, &pi->curbusaddr, is_write)) != N64PI_ERROR_SUCCESS) {
+	/* Do DMA! */
+	if ((error = dma(pi, op, ram_vaddr, cart_addr, length, &curbusaddr, is_write)) != N64PI_ERROR_SUCCESS) {
 		return error;
 	}
 
-	pi->nonblock_op = op;
-	pi->length = length;
-	pi->is_write = is_write;
-	pi->on_interrupt = on_interrupt;
-	pi->on_interrupt_cookie = cookie;
+	/* Wait for DMA completion ("blocking") */
+	block_until_pi_completion(pi);
+
+	/* Cleanup the DMA */
+	if ((error = cleanup_dma(pi, op, curbusaddr, length, is_write)) != N64PI_ERROR_SUCCESS) {
+		return error;
+	}
+
+	/* Drop interrupt pending flag to avoid spurious interrupt */
+	__raw_writel(0x00000002, pi->regbase + REG_STATUS);
 
 	return N64PI_ERROR_SUCCESS;
 }
 
-static int
-dequeue_and_do_nonblock_dma(struct n64pi *pi) {
-	if (pi->opqueue_len <= 0) {
-		/* queue is already empty; nothing to do. */
-		return N64PI_ERROR_SUCCESS;
+void
+n64pi_begin(struct n64pi *pi) {
+	spin_lock_irqsave(&pi->lock, pi->flags);
+
+	if (pi->ongoing) {
+		panic("n64pi sub driver program error: recursive begin (or forgot to n64pi_end?)");
 	}
 
-	/* note: touching opqueue[--len] directly is safe here, because pi is locked and this is tailcall(ref to opqueue is only here before calling do_nonblock_dma). */
-	{
-		struct opqueue * const opq = &pi->opqueue[--pi->opqueue_len]; // dequeue and reference (that be freed at returning from here)
-		return do_nonblock_dma(pi, opq->ram_vaddr, opq->cart_addr, opq->length, opq->before_dma, opq->on_interrupt, opq->cookie, opq->is_write);
-	}
+	pi->ongoing = 1;
 }
+EXPORT_SYMBOL_GPL(n64pi_begin);
 
-static int
-nonblock_dma(struct n64pi *pi, void *ram_vaddr, uint32_t cart_addr, uint32_t length, n64pi_before_dma_t before_dma, n64pi_on_interrupt_t on_interrupt, void *cookie, int is_write) {
-	int error;
-	unsigned long flags;
+void
+n64pi_end(struct n64pi *pi) {
+	ensure_beginned(pi);
 
-	spin_lock_irqsave(&pi->lock, flags);
+	pi->ongoing = 0;
 
-#ifdef DEBUG_REQLOG
-	n64pi_log_put(jiffies);
-	n64pi_log_put(((is_write ? 4 : 3) << 28) | length);
-	n64pi_log_put(cart_addr);
-	n64pi_log_put((unsigned)ram_vaddr);
-#endif
-
-	if (is_busy(pi) || pi->nonblock_op) {
-		/* PI DMA is busy, or just finished but not callbacked yet... enqueue this op. */
-		error = enqueue_op(pi, ram_vaddr, cart_addr, length, before_dma, on_interrupt, cookie, is_write);
-		spin_unlock_irqrestore(&pi->lock, flags);
-		return error;
-	}
-
-	/* PI is idle, do it now (without enqueueing) */
-	error = do_nonblock_dma(pi, ram_vaddr, cart_addr, length, before_dma, on_interrupt, cookie, is_write);
-
-	spin_unlock_irqrestore(&pi->lock, flags);
-
-	return error;
+	spin_unlock_irqrestore(&pi->lock, pi->flags);
 }
+EXPORT_SYMBOL_GPL(n64pi_end);
 
 int
-n64pi_blocking_read_dma(struct n64pi *pi, void *ram_vaddr, uint32_t cart_addr, uint32_t length) {
+n64pi_read_dma(struct n64pi *pi, void *ram_vaddr, uint32_t cart_addr, uint32_t length) {
 	return blocking_dma(pi, ram_vaddr, cart_addr, length, 0);
 }
-EXPORT_SYMBOL_GPL(n64pi_blocking_read_dma);
+EXPORT_SYMBOL_GPL(n64pi_read_dma);
 
 int
-n64pi_nonblock_read_dma(struct n64pi *pi, void *ram_vaddr, uint32_t cart_addr, uint32_t length, n64pi_before_dma_t before_dma, n64pi_on_interrupt_t on_interrupt, void *cookie) {
-	return nonblock_dma(pi, ram_vaddr, cart_addr, length, before_dma, on_interrupt, cookie, 0);
-}
-EXPORT_SYMBOL_GPL(n64pi_nonblock_read_dma);
-
-int
-n64pi_blocking_write_dma(struct n64pi *pi, uint32_t cart_addr, void *ram_vaddr, uint32_t length) {
+n64pi_write_dma(struct n64pi *pi, uint32_t cart_addr, void *ram_vaddr, uint32_t length) {
 	return blocking_dma(pi, ram_vaddr, cart_addr, length, 1);
 }
-EXPORT_SYMBOL_GPL(n64pi_blocking_write_dma);
-
-int
-n64pi_nonblock_write_dma(struct n64pi *pi, uint32_t cart_addr, void *ram_vaddr, uint32_t length, n64pi_before_dma_t before_dma, n64pi_on_interrupt_t on_interrupt, void *cookie) {
-	return nonblock_dma(pi, ram_vaddr, cart_addr, length, before_dma, on_interrupt, cookie, 1);
-}
-EXPORT_SYMBOL_GPL(n64pi_nonblock_write_dma);
+EXPORT_SYMBOL_GPL(n64pi_write_dma);
 
 /* TODO how about addressing error? but I don't want to store value into memory... introduce "value_on_error"? */
 uint32_t
-n64pi_blocking_read_word(struct n64pi *pi, uint32_t cart_addr) {
+n64pi_read_word(struct n64pi *pi, uint32_t cart_addr) {
 	int error;
-	unsigned long flags;
 	uint32_t value;
 
-	spin_lock_irqsave(&pi->lock, flags);
+	ensure_beginned(pi);
 
 #ifdef DEBUG_REQLOG
 	n64pi_log_put(jiffies);
@@ -419,10 +304,9 @@ n64pi_blocking_read_word(struct n64pi *pi, uint32_t cart_addr) {
 	block_until_pi_completion(pi);
 
 	/* Make PI steady */
-	(void)ensure_noerror(pi, "b_r_w");
+	(void)ensure_noerror(pi, "r_w");
 
-	if ((error = validate_word(pi, "b_r_w", cart_addr)) != N64PI_ERROR_SUCCESS) {
-		spin_unlock_irqrestore(&pi->lock, flags);
+	if ((error = validate_word(pi, "r_w", cart_addr)) != N64PI_ERROR_SUCCESS) {
 		return error; /* TODO invalid! */
 	}
 
@@ -432,18 +316,15 @@ n64pi_blocking_read_word(struct n64pi *pi, uint32_t cart_addr) {
 	n64pi_log_put(value);
 #endif
 
-	spin_unlock_irqrestore(&pi->lock, flags);
-
 	return value;
 }
-EXPORT_SYMBOL_GPL(n64pi_blocking_read_word);
+EXPORT_SYMBOL_GPL(n64pi_read_word);
 
 int
-n64pi_blocking_write_word(struct n64pi *pi, uint32_t cart_addr, uint32_t value) {
+n64pi_write_word(struct n64pi *pi, uint32_t cart_addr, uint32_t value) {
 	int error;
-	unsigned long flags;
 
-	spin_lock_irqsave(&pi->lock, flags);
+	ensure_beginned(pi);
 
 #ifdef DEBUG_REQLOG
 	n64pi_log_put(jiffies);
@@ -456,26 +337,21 @@ n64pi_blocking_write_word(struct n64pi *pi, uint32_t cart_addr, uint32_t value) 
 	block_until_pi_completion(pi);
 
 	/* Make PI steady */
-	(void)ensure_noerror(pi, "b_w_w");
+	(void)ensure_noerror(pi, "w_w");
 
-	if ((error = validate_word(pi, "b_w_w", cart_addr)) != N64PI_ERROR_SUCCESS) {
-		spin_unlock_irqrestore(&pi->lock, flags);
-		return error; /* TODO invalid! */
+	if ((error = validate_word(pi, "w_w", cart_addr)) != N64PI_ERROR_SUCCESS) {
+		return error;
 	}
 
 	__raw_writel(value, pi->membase + cart_addr - 0x05000000U); /* TODO hard coding membase offset!! */
 
-	spin_unlock_irqrestore(&pi->lock, flags);
-
 	return error;
 }
-EXPORT_SYMBOL_GPL(n64pi_blocking_write_word);
+EXPORT_SYMBOL_GPL(n64pi_write_word);
 
 void
 n64pi_reset(struct n64pi *pi) {
-	unsigned long flags;
-
-	spin_lock_irqsave(&pi->lock, flags);
+	ensure_beginned(pi);
 
 #ifdef DEBUG_REQLOG
 	n64pi_log_put(jiffies);
@@ -485,17 +361,14 @@ n64pi_reset(struct n64pi *pi) {
 #endif
 
 	__raw_writel(0x00000003, pi->regbase + REG_STATUS);
-
-	spin_unlock_irqrestore(&pi->lock, flags);
 }
-EXPORT_SYMBOL_GPL(n64pi_blocking_reset);
+EXPORT_SYMBOL_GPL(n64pi_reset);
 
 uint32_t
 n64pi_get_status(struct n64pi *pi) {
-	unsigned long flags;
 	uint32_t status;
 
-	spin_lock_irqsave(&pi->lock, flags);
+	ensure_beginned(pi);
 
 #ifdef DEBUG_REQLOG
 	n64pi_log_put(jiffies);
@@ -509,17 +382,13 @@ n64pi_get_status(struct n64pi *pi) {
 	n64pi_log_put(status);
 #endif
 
-	spin_unlock_irqrestore(&pi->lock, flags);
-
 	return status;
 }
-EXPORT_SYMBOL_GPL(n64pi_blocking_get_status);
+EXPORT_SYMBOL_GPL(n64pi_get_status);
 
 int
-n64pi_blocking_ed64_enable(struct n64pi *pi) {
-	unsigned long flags;
-
-	spin_lock_irqsave(&pi->lock, flags);
+n64pi_ed64_enable(struct n64pi *pi) {
+	ensure_beginned(pi);
 
 #ifdef DEBUG_REQLOG
 	n64pi_log_put(jiffies);
@@ -535,17 +404,13 @@ n64pi_blocking_ed64_enable(struct n64pi *pi) {
 	// TODO INT_MAX check?
 	pi->ed64_enabled++;
 
-	spin_unlock_irqrestore(&pi->lock, flags);
-
 	return N64PI_ERROR_SUCCESS;
 }
-EXPORT_SYMBOL_GPL(n64pi_blocking_ed64_enable);
+EXPORT_SYMBOL_GPL(n64pi_ed64_enable);
 
 int
-n64pi_blocking_ed64_disable(struct n64pi *pi) {
-	unsigned long flags;
-
-	spin_lock_irqsave(&pi->lock, flags);
+n64pi_ed64_disable(struct n64pi *pi) {
+	ensure_beginned(pi);
 
 #ifdef DEBUG_REQLOG
 	n64pi_log_put(jiffies);
@@ -560,26 +425,18 @@ n64pi_blocking_ed64_disable(struct n64pi *pi) {
 	}
 	pi->ed64_enabled--;
 	if (pi->ed64_enabled < 0) {
-		dev_err(pi->dev, "too many ED64 disable request; reset count to 0\n");
+		dev_err(pi->dev, "n64pi sub driver program error: too many ED64 disable request... reset count to 0\n");
 		pi->ed64_enabled = 0;
 	}
 
-	spin_unlock_irqrestore(&pi->lock, flags);
-
 	return N64PI_ERROR_SUCCESS;
 }
-EXPORT_SYMBOL_GPL(n64pi_blocking_ed64_disable);
+EXPORT_SYMBOL_GPL(n64pi_ed64_disable);
 
 static irqreturn_t n64pi_isr(int irq, void *dev_id)
 {
 	struct n64pi *pi = dev_id;
 	uint32_t status;
-	const char *curop;
-	dma_addr_t curbusaddr;
-	uint32_t length;
-	int is_write;
-	n64pi_on_interrupt_t on_interrupt;
-	void *cookie;
 
 	/* spin_lock pi->lock to use pi->regbase here (and for later memorize). */
 	/* TODO may not be required? we are in interrupt context that is intr-masked, no one disturb us... */
@@ -592,39 +449,13 @@ static irqreturn_t n64pi_isr(int irq, void *dev_id)
 	/* ack this interrupt (before potential next request in on_complete, not to ack next request... cause infinite wait!) */
 	__raw_writel(2, pi->regbase + REG_STATUS); // [1]=clear_intr
 
-	/* memorize in lock means atomic */
-	curop = pi->nonblock_op;
-	curbusaddr = pi->curbusaddr;
-	length = pi->length;
-	is_write = pi->is_write;
-	on_interrupt = pi->on_interrupt;
-	cookie = pi->on_interrupt_cookie;
-
-	pi->nonblock_op = NULL;
-
 	spin_unlock(&pi->lock);
 
-	if (curop == NULL) {
-		dev_err(pi->dev, "Spurious interrupt: status=%x; resetting.\n", status);
+	/* Currently n64pi is blocking op only; interrupt must be never happened. */
+	dev_err(pi->dev, "Spurious interrupt: status=%x; resetting.\n", status);
 
-		/* reset PI */
-		__raw_writel(0x00000003, pi->regbase + REG_STATUS);
-	} else {
-		/* valid current request found; interrupt means current request's DMA has done */
-		int error;
-
-		if ((error = cleanup_dma(pi, curop, curbusaddr, length, is_write)) != N64PI_ERROR_SUCCESS) {
-			/* uh... can't do anything here. */
-		}
-
-		/* call the on_interrupt if specified. NOTE pi->lock must be unlocked or it will deadlock (if another request is issued in on_interrupt)! */
-		if (on_interrupt) {
-			on_interrupt(pi, cookie, status);
-		}
-	}
-
-	/* optionally run enqueued op */
-	dequeue_and_do_nonblock_dma(pi);
+	/* reset PI */
+	__raw_writel(0x00000003, pi->regbase + REG_STATUS);
 
 	return IRQ_HANDLED;
 }
@@ -633,6 +464,7 @@ static const struct mfd_cell n64pi_cells[] = {
 	{ .name = "n64pi-cart", .of_compatible = "nintendo,pi-cart", },
 	{ .name = "n64pi-ed64tty", .of_compatible = "nintendo,pi-ed64tty" }, // TODO OF? CONFIG?
 	// TODO 64drive tty support
+	// TODO mmc support
 };
 
 static int __init n64pi_probe(struct platform_device *pdev)
@@ -684,9 +516,8 @@ static int __init n64pi_probe(struct platform_device *pdev)
 	}
 
 	spin_lock_init(&pi->lock);
-	pi->nonblock_op = NULL;
+	pi->ongoing = 0;
 	pi->ed64_enabled = 0;
-	pi->opqueue_len = 0;
 	platform_set_drvdata(pdev, pi);
 
 	/* do this after device.driver_data is populated, cuz children reference it as dev.parent.driver_data. */
