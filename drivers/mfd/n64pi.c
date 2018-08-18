@@ -44,6 +44,18 @@ struct n64pi { /* represents the driver status of the PI device */
 	int is_write; /* holds DMA direction */
 	n64pi_on_interrupt_t on_interrupt; /* points to current nonblock request's callback, NULL if no nonblock request is on going. */
 	void *on_interrupt_cookie; /* holds cookie for on_interrupt callback */
+
+	/* info about queued operations; fixed-array for less memory usage, and its ok because limited sub-drivers, and it should queue only one per one driver. */
+	struct n64pi_opqueue {
+		void *ram_vaddr;
+		uint32_t cart_addr;
+		uint32_t length;
+		n64pi_before_dma_t before_dma;
+		n64pi_on_interrupt_t on_interrupt;
+		void *cookie;
+		int is_write;
+	} opqueue[4];
+	uint32_t opqueue_len;
 };
 
 #ifdef DEBUG_REQLOG
@@ -265,11 +277,80 @@ n64pi_blocking_dma(struct n64pi *pi, void *ram_vaddr, uint32_t cart_addr, uint32
 	return N64PI_ERROR_SUCCESS;
 }
 
+static int n64pi_enqueue_op(struct n64pi *pi, void *ram_vaddr, uint32_t cart_addr, uint32_t length, n64pi_before_dma_t before_dma, n64pi_on_interrupt_t on_interrupt, void *cookie, int is_write) {
+	const char *op = is_write ? "n_w_d" : "n_r_d";
+
+	if (sizeof(pi->opqueue)/sizeof(pi->opqueue[0]) <= pi->opqueue_len) {
+		/* queue full */
+		dev_err(pi->dev, "%s: opqueue full; skipping! %p/%08X+%08X)\n", op, ram_vaddr, cart_addr, length);
+		return N64PI_ERROR_NOMEM;
+	}
+
+	/* enqueue */
+	{
+		struct n64pi_opqueue * const opq = &pi->opqueue[pi->opqueue_len];
+		opq->ram_vaddr = ram_vaddr;
+		opq->cart_addr = cart_addr;
+		opq->length = length;
+		opq->before_dma = before_dma;
+		opq->on_interrupt = on_interrupt;
+		opq->cookie = cookie;
+		opq->is_write = is_write;
+	}
+	pi->opqueue_len++;
+
+	/* caller wants this */
+	return N64PI_ERROR_BUSY;
+}
+
 static int
-n64pi_nonblock_dma(struct n64pi *pi, void *ram_vaddr, uint32_t cart_addr, uint32_t length, n64pi_on_interrupt_t on_interrupt, void *cookie, int is_write) {
+n64pi_do_nonblock_dma(struct n64pi *pi, void *ram_vaddr, uint32_t cart_addr, uint32_t length, n64pi_before_dma_t before_dma, n64pi_on_interrupt_t on_interrupt, void *cookie, int is_write) {
+	int error;
+	const char *op = is_write ? "n_w_d" : "n_r_d";
+
+#ifdef DEBUG_REQLOG
+	n64pi_log_put(jiffies);
+	n64pi_log_put(((is_write ? 104 : 103) << 28) | length);
+	n64pi_log_put(cart_addr);
+	n64pi_log_put((unsigned)ram_vaddr);
+#endif
+
+	/* Make PI steady */
+	(void)n64pi_ensure_noerror(pi, op);
+
+	before_dma(pi, cookie);
+
+	if ((error = n64pi_dma(pi, op, ram_vaddr, cart_addr, length, &pi->curbusaddr, is_write)) != N64PI_ERROR_SUCCESS) {
+		return error;
+	}
+
+	pi->nonblock_op = op;
+	pi->length = length;
+	pi->is_write = is_write;
+	pi->on_interrupt = on_interrupt;
+	pi->on_interrupt_cookie = cookie;
+
+	return N64PI_ERROR_SUCCESS;
+}
+
+static int
+n64pi_dequeue_and_do_nonblock_dma(struct n64pi *pi) {
+	if (pi->opqueue_len <= 0) {
+		/* queue is already empty; nothing to do. */
+		return N64PI_ERROR_SUCCESS;
+	}
+
+	/* note: touching opqueue[--len] directly is safe here, because pi is locked and this is tailcall(ref to opqueue is only here before calling n64pi_do_nonblock_dma). */
+	{
+		struct n64pi_opqueue * const opq = &pi->opqueue[--pi->opqueue_len]; // dequeue and reference (that be freed at returning from here)
+		return n64pi_do_nonblock_dma(pi, opq->ram_vaddr, opq->cart_addr, opq->length, opq->before_dma, opq->on_interrupt, opq->cookie, opq->is_write);
+	}
+}
+
+static int
+n64pi_nonblock_dma(struct n64pi *pi, void *ram_vaddr, uint32_t cart_addr, uint32_t length, n64pi_before_dma_t before_dma, n64pi_on_interrupt_t on_interrupt, void *cookie, int is_write) {
 	int error;
 	unsigned long flags;
-	const char *op = is_write ? "n_w_d" : "n_r_d";
 
 	spin_lock_irqsave(&pi->lock, flags);
 
@@ -280,35 +361,19 @@ n64pi_nonblock_dma(struct n64pi *pi, void *ram_vaddr, uint32_t cart_addr, uint32
 	n64pi_log_put((unsigned)ram_vaddr);
 #endif
 
-	if (n64pi_is_busy(pi)) {
-		dev_err(pi->dev, "%s: PI is busy, skipping.\n", op);
-		spin_unlock_irqrestore(&pi->lock, flags);
-		return N64PI_ERROR_BUSY;
-	}
-
-	if (pi->nonblock_op) {
-		dev_err(pi->dev, "%s: Ongoing nonblock op exists (%s), skipping.\n", op, pi->nonblock_op);
-		spin_unlock_irqrestore(&pi->lock, flags);
-		return N64PI_ERROR_BUSY;
-	}
-
-	/* Make PI steady */
-	(void)n64pi_ensure_noerror(pi, op);
-
-	if ((error = n64pi_dma(pi, op, ram_vaddr, cart_addr, length, &pi->curbusaddr, is_write)) != N64PI_ERROR_SUCCESS) {
+	if (n64pi_is_busy(pi) || pi->nonblock_op) {
+		/* PI DMA is busy, or just finished but not callbacked yet... enqueue this op. */
+		error = n64pi_enqueue_op(pi, ram_vaddr, cart_addr, length, before_dma, on_interrupt, cookie, is_write);
 		spin_unlock_irqrestore(&pi->lock, flags);
 		return error;
 	}
 
-	pi->nonblock_op = op;
-	pi->length = length;
-	pi->is_write = is_write;
-	pi->on_interrupt = on_interrupt;
-	pi->on_interrupt_cookie = cookie;
+	/* PI is idle, do it now (without enqueueing) */
+	error = n64pi_do_nonblock_dma(pi, ram_vaddr, cart_addr, length, before_dma, on_interrupt, cookie, is_write);
 
 	spin_unlock_irqrestore(&pi->lock, flags);
 
-	return N64PI_ERROR_SUCCESS;
+	return error;
 }
 
 int
@@ -318,8 +383,8 @@ n64pi_blocking_read_dma(struct n64pi *pi, void *ram_vaddr, uint32_t cart_addr, u
 EXPORT_SYMBOL_GPL(n64pi_blocking_read_dma);
 
 int
-n64pi_nonblock_read_dma(struct n64pi *pi, void *ram_vaddr, uint32_t cart_addr, uint32_t length, n64pi_on_interrupt_t on_interrupt, void *cookie) {
-	return n64pi_nonblock_dma(pi, ram_vaddr, cart_addr, length, on_interrupt, cookie, 0);
+n64pi_nonblock_read_dma(struct n64pi *pi, void *ram_vaddr, uint32_t cart_addr, uint32_t length, n64pi_before_dma_t before_dma, n64pi_on_interrupt_t on_interrupt, void *cookie) {
+	return n64pi_nonblock_dma(pi, ram_vaddr, cart_addr, length, before_dma, on_interrupt, cookie, 0);
 }
 EXPORT_SYMBOL_GPL(n64pi_nonblock_read_dma);
 
@@ -330,8 +395,8 @@ n64pi_blocking_write_dma(struct n64pi *pi, uint32_t cart_addr, void *ram_vaddr, 
 EXPORT_SYMBOL_GPL(n64pi_blocking_write_dma);
 
 int
-n64pi_nonblock_write_dma(struct n64pi *pi, uint32_t cart_addr, void *ram_vaddr, uint32_t length, n64pi_on_interrupt_t on_interrupt, void *cookie) {
-	return n64pi_nonblock_dma(pi, ram_vaddr, cart_addr, length, on_interrupt, cookie, 1);
+n64pi_nonblock_write_dma(struct n64pi *pi, uint32_t cart_addr, void *ram_vaddr, uint32_t length, n64pi_before_dma_t before_dma, n64pi_on_interrupt_t on_interrupt, void *cookie) {
+	return n64pi_nonblock_dma(pi, ram_vaddr, cart_addr, length, before_dma, on_interrupt, cookie, 1);
 }
 EXPORT_SYMBOL_GPL(n64pi_nonblock_write_dma);
 
@@ -516,7 +581,10 @@ static irqreturn_t n64pi_isr(int irq, void *dev_id)
 	n64pi_on_interrupt_t on_interrupt;
 	void *cookie;
 
-	/* TODO spin_lock pi->lock here? seems paranoid. */
+	/* spin_lock pi->lock to use pi->regbase here (and for later memorize). */
+	/* TODO may not be required? we are in interrupt context that is intr-masked, no one disturb us... */
+	/* TODO uh... spin_lock_irqsave/spin_unlock_irqrestore is bad? thinking it just for paranoid. */
+	spin_lock(&pi->lock);
 
 	/* get current PI status before do anything */
 	status = __raw_readl(pi->regbase + REG_STATUS);
@@ -524,11 +592,7 @@ static irqreturn_t n64pi_isr(int irq, void *dev_id)
 	/* ack this interrupt (before potential next request in on_complete, not to ack next request... cause infinite wait!) */
 	__raw_writel(2, pi->regbase + REG_STATUS); // [1]=clear_intr
 
-	/* memorize atomically */
-	/* TODO may not be required? we are in interrupt context that is intr-masked, no one disturb us... */
-	/* TODO uh... spin_lock_irqsave/spin_unlock_irqrestore is bad? thinking it just for paranoid. */
-	spin_lock(&pi->lock);
-
+	/* memorize in lock means atomic */
 	curop = pi->nonblock_op;
 	curbusaddr = pi->curbusaddr;
 	length = pi->length;
@@ -558,6 +622,9 @@ static irqreturn_t n64pi_isr(int irq, void *dev_id)
 			on_interrupt(pi, cookie, status);
 		}
 	}
+
+	/* optionally run enqueued op */
+	n64pi_dequeue_and_do_nonblock_dma(pi);
 
 	return IRQ_HANDLED;
 }
@@ -619,6 +686,7 @@ static int __init n64pi_probe(struct platform_device *pdev)
 	spin_lock_init(&pi->lock);
 	pi->nonblock_op = NULL;
 	pi->ed64_enabled = 0;
+	pi->opqueue_len = 0;
 	platform_set_drvdata(pdev, pi);
 
 	/* do this after device.driver_data is populated, cuz children reference it as dev.parent.driver_data. */

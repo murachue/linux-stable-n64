@@ -17,6 +17,7 @@
 
 struct n64pi; /* private struct of driver */
 
+typedef void (*n64pi_before_dma_t)(struct n64pi *pi, void *cookie);
 typedef void (*n64pi_on_interrupt_t)(struct n64pi *pi, void *cookie, uint32_t status);
 
 #define N64PI_ERROR_SUCCESS    0
@@ -24,18 +25,19 @@ typedef void (*n64pi_on_interrupt_t)(struct n64pi *pi, void *cookie, uint32_t st
 #define N64PI_ERROR_DMAMAP     -2
 #define N64PI_ERROR_PIDMA      -3
 #define N64PI_ERROR_BUSY       -4
+#define N64PI_ERROR_NOMEM      -5
 
 extern int
 n64pi_blocking_read_dma(struct n64pi *pi, void *ram_vaddr, uint32_t cart_addr, uint32_t length);
 
 extern int
-n64pi_nonblock_read_dma(struct n64pi *pi, void *ram_vaddr, uint32_t cart_addr, uint32_t length, n64pi_on_interrupt_t on_interrupt, void *cookie);
+n64pi_nonblock_read_dma(struct n64pi *pi, void *ram_vaddr, uint32_t cart_addr, uint32_t length, n64pi_before_dma_t before_dma, n64pi_on_interrupt_t on_interrupt, void *cookie);
 
 extern int
 n64pi_blocking_write_dma(struct n64pi *pi, uint32_t cart_addr, void *ram_vaddr, uint32_t length);
 
 extern int
-n64pi_nonblock_write_dma(struct n64pi *pi, uint32_t cart_addr, void *ram_vaddr, uint32_t length, n64pi_on_interrupt_t on_interrupt, void *cookie);
+n64pi_nonblock_write_dma(struct n64pi *pi, uint32_t cart_addr, void *ram_vaddr, uint32_t length, n64pi_before_dma_t before_dma, n64pi_on_interrupt_t on_interrupt, void *cookie);
 
 /* TODO how about addressing error? but I don't want to store value into memory... introduce "value_on_error"? */
 extern uint32_t
