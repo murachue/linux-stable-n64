@@ -196,6 +196,7 @@ static void hd_request(void)
 				if (n64pi_ed64_enable(pi) != N64PI_ERROR_SUCCESS) {
 					pr_err("%s: could not enable ED64 registers\n", req->rq_disk->disk_name);
 					hd_end_request_entire(-ENOMEM);
+					n64pi_end(pi);
 					break;
 				}
 
@@ -213,6 +214,7 @@ static void hd_request(void)
 				if (n64pi_ed64_disable(pi) != N64PI_ERROR_SUCCESS) {
 					pr_err("%s: could not disable ED64 registers\n", req->rq_disk->disk_name);
 					hd_end_request_entire(-ENOMEM);
+					n64pi_end(pi);
 					break;
 				}
 
