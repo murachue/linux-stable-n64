@@ -266,6 +266,23 @@ n64pi_begin(struct n64pi *pi) {
 }
 EXPORT_SYMBOL_GPL(n64pi_begin);
 
+int
+n64pi_trybegin(struct n64pi *pi) {
+	if (!spin_trylock_irqsave(&pi->lock, pi->flags)) {
+		return N64PI_ERROR_BUSY;
+	}
+
+	if (pi->ongoing) {
+		spin_unlock_irqrestore(&pi->lock, pi->flags);
+		return N64PI_ERROR_BUSY;
+	}
+
+	pi->ongoing = 1;
+
+	return N64PI_ERROR_SUCCESS;
+}
+EXPORT_SYMBOL_GPL(n64pi_begin);
+
 void
 n64pi_end(struct n64pi *pi) {
 	ensure_beginned(pi);

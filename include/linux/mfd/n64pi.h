@@ -18,14 +18,19 @@
 struct n64pi; /* private struct of driver */
 
 #define N64PI_ERROR_SUCCESS    0
-#define N64PI_ERROR_STATE      -1
-#define N64PI_ERROR_ADDRESSING -2
-#define N64PI_ERROR_DMAMAP     -3
-#define N64PI_ERROR_PIDMA      -4
+#define N64PI_ERROR_BUSY       -1 /* n64pi_trybegin failed */
+#define N64PI_ERROR_ADDRESSING -2 /* cart_addr is out of range */
+#define N64PI_ERROR_DMAMAP     -3 /* kernel could not map DMA */
+#define N64PI_ERROR_PIDMA      -4 /* PI reported an error */
+#define N64PI_ERROR_NXIO       -5 /* not supported by cart (ex. ED64 ops on 64drive) */
 
 /* will panic if recursively beginned */
 extern void
 n64pi_begin(struct n64pi *pi);
+
+/* does not panic, for tty (that could called in other n64pi users) */
+extern int
+n64pi_trybegin(struct n64pi *pi);
 
 /* will panic if not beginned */
 extern void
