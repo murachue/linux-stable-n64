@@ -181,7 +181,10 @@ static int ed64_tx(struct uart_port *port, int emit_error)
 	struct ed64_private *ed64 = (struct ed64_private *)port->private_data;
 	struct n64pi * const pi = ed64->pi;
 
-	n64pi_begin(pi);
+	if (n64pi_trybegin(pi) != N64PI_ERROR_SUCCESS) {
+		/* we are in some other n64pi user context... maybe from console write. tx later (on next polling). */
+		return 0;
+	}
 
 	if (n64pi_ed64_enable(pi) != N64PI_ERROR_SUCCESS) {
 		if (emit_error) {
@@ -190,7 +193,7 @@ static int ed64_tx(struct uart_port *port, int emit_error)
 		goto err;
 	}
 
-	/* ram(ed64->xbuf) -> cart */
+	/* ram(ed64->xmitbuf) -> cart */
 	// TODO variable length for shorter DMA time? but it is small enough...
 	if (n64pi_write_dma(pi, 0x10000000 + ed64->rombase, ed64->xmitbuf, 256) != N64PI_ERROR_SUCCESS) {
 		if (emit_error) {
@@ -231,6 +234,8 @@ static int ed64_tx(struct uart_port *port, int emit_error)
 	}
 
 	n64pi_end(pi);
+
+	ed64->xmitbuf[0] = 0; /* clear buffer */
 
 	return 1;
 
@@ -277,13 +282,17 @@ static void ed64_write(struct uart_port *port)
 		struct ed64_private *ed64 = (struct ed64_private *)port->private_data;
 
 		// prepare xmitbuf
+		// TODO don't buffer anything if xmitbuf is not empty, because console is buffering and it cannot be delayed,
+		//      though tty can.
 		{
-			unsigned char *pbuf = ed64->xmitbuf;
+			unsigned int off = ed64->xmitbuf[0];
+			unsigned int avail = port->fifosize - off;
 			unsigned int _count = uart_circ_chars_pending(xmit);
-			unsigned int count = (_count < port->fifosize) ? _count : port->fifosize; // min(count, port->fifosize)
+			unsigned int count = (_count < avail) ? _count : avail; // min(count, avail)
+			unsigned char *pbuf = ed64->xmitbuf + 1 + off;
 			unsigned int i;
 
-			*pbuf++ = count;
+			ed64->xmitbuf[0] = off + count;
 			// TODO 1 or 2(wrapped) memcpy?
 			for(i = 0; i < count; i++) {
 				*pbuf++ = (unsigned char)xmit->buf[xmit->tail];
@@ -792,9 +801,11 @@ static void ed64_console_write(struct console *co, const char *buf, unsigned cou
 	// TODO check ED64 DMA status
 	// TODO spinlock_irq port.lock
 	struct ed64_private *ed64 = port.private_data;
-	unsigned len = (255 < count) ? 255 : count; // min(count, 255)
-	ed64->xmitbuf[0] = len;
-	memcpy(ed64->xmitbuf + 1, buf, len);
+	unsigned pos = ed64->xmitbuf[0];
+	unsigned avail = 255 - pos;
+	unsigned len = (avail < count) ? avail : count; // min(avail, count)
+	ed64->xmitbuf[0] += len;
+	memcpy(ed64->xmitbuf + 1 + pos, buf, len);
 	if (!ed64_tx(&port, 0)) {
 		// error... but putting message cause recursive write. do nothing.
 	}
@@ -869,6 +880,7 @@ static int ed64_probe(struct platform_device *pdev)
 	ed64->pi = dev_get_drvdata(pdev->dev.parent); /* TODO dev.parent->parent is n64pi?? ipaq-micro-leds */
 	ed64->rombase = (0x04000000-0x0800); // TODO configurable or IORESOURCE_MEM/IO?
 	ed64->status = 0; /* TODO is 0 valid for initialize?? (seems ok, it means wrongly "can TX&RX", but overwritten by poll.) */
+	ed64->xmitbuf[0] = 0; /* make buffer empty */
 
 	/* register a port in driver */
 	port.iobase = 0; // no I/O port
