@@ -91,7 +91,7 @@ static void hd_request(void)
 		pr_info("%s: %s req: req=%p, block=%ld, size=%Xh/%Xh, buffer=%p\n",
 			req->rq_disk->disk_name,
 			rq_data_dir(req) == READ ? "read" : "write",
-			req, block, ncurbytes, nsect * 512, pcurbuf);
+			req, blk_rq_pos(req), ncurbytes, blk_rq_sectors(req) * 512, pcurbuf);
 #endif
 		if (req->cmd_type != REQ_TYPE_FS) {
 			/* TODO should hd_end_request_entire?? */
@@ -113,7 +113,7 @@ static void hd_request(void)
 #ifdef N64CART_VERIFY_READ
 				for(;;) { /* loop until re-read content matches to pre-read. */
 #endif
-					while ((ret = n64pi_read_dma(pi, pcurbuf, 0x10000000 + block * 512, ncurbytes)) != N64PI_ERROR_SUCCESS) {
+					while ((ret = n64pi_read_dma(pi, pcurbuf, 0x10000000 + blk_rq_pos(req) * 512, ncurbytes)) != N64PI_ERROR_SUCCESS) {
 						pr_err("%s: PI read error (%d) for %ld+%Xh; retrying\n", req->rq_disk->disk_name, ret, blk_rq_pos(req), blk_rq_cur_bytes(req));
 					}
 
@@ -201,7 +201,7 @@ static void hd_request(void)
 					break;
 				}
 
-				while ((ret = n64pi_write_dma(pi, 0x10000000 + block * 512, pcurbuf, ncurbytes)) != N64PI_ERROR_SUCCESS) {
+				while ((ret = n64pi_write_dma(pi, 0x10000000 + blk_rq_pos(req) * 512, pcurbuf, ncurbytes)) != N64PI_ERROR_SUCCESS) {
 					pr_err("%s: PI write error (%d) for %ld+%Xh; retrying\n", req->rq_disk->disk_name, ret, blk_rq_pos(req), blk_rq_cur_bytes(req));
 				}
 
