@@ -318,6 +318,7 @@ static void ed64_read(struct uart_port *port)
 
 	struct ed64_private *ed64 = (struct ed64_private *)port->private_data;
 	struct n64pi * const pi = ed64->pi;
+	unsigned char __attribute((aligned(8))) recvbuf[256]; /* 1+255 */
 
 	n64pi_begin(pi);
 
@@ -354,7 +355,7 @@ static void ed64_read(struct uart_port *port)
 	}
 
 	// Get rx buffer in ED64 ROM
-	if (n64pi_read_dma(pi, ed64->xmitbuf, 0x10000000 + ed64->rombase, 256) != N64PI_ERROR_SUCCESS) {
+	if (n64pi_read_dma(pi, recvbuf, 0x10000000 + ed64->rombase, 256) != N64PI_ERROR_SUCCESS) {
 		pr_err("%s: DMA transfer error\n", __func__);
 		goto err;
 	}
@@ -362,7 +363,7 @@ static void ed64_read(struct uart_port *port)
 	n64pi_end(pi);
 
 	{
-		const unsigned char *pbuf = ed64->xmitbuf; // that just be filled
+		const unsigned char *pbuf = recvbuf; // that just be filled
 		unsigned int count;
 
 #ifdef DEBUG
