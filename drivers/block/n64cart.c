@@ -174,6 +174,7 @@ static void hd_request(void)
 					/* note: I am called from blk-core, it locks queue. __blk_end_request requires that. */
 					hd_end_request(0, blk_rq_cur_bytes(req));
 #ifdef N64CART_VERIFY_READ
+					break; /* success, get out of this loop. */
 				} /* end of "for(;;)" for verify */
 #endif
 
