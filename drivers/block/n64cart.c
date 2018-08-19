@@ -53,8 +53,7 @@ static bool hd_end_request_entire(int err)
  */
 static void hd_request(void)
 {
-	sector_t block;
-	unsigned int nsect, ncurbytes;
+	unsigned int ncurbytes;
 	void *pcurbuf;
 	struct request *req;
 	struct n64pi *pi;
@@ -69,20 +68,22 @@ static void hd_request(void)
 				return;
 			}
 
-			/* verify this request is valid */
-			req = hd_req; /* cache */
+			req = hd_req;
 
-			block = blk_rq_pos(req);
-			nsect = blk_rq_sectors(req);
-			if (block >= get_capacity(req->rq_disk) || ((block+nsect) > get_capacity(req->rq_disk))) {
-				pr_err("%s: bad access: block=%ld, count=%d\n", req->rq_disk->disk_name, block, nsect);
-				hd_end_request_entire(-EIO);
-				continue;
+			/* verify this request is valid */
+			{
+				sector_t block = blk_rq_pos(req);
+				unsigned int nsect = blk_rq_sectors(req);
+				if (block >= get_capacity(req->rq_disk) || ((block+nsect) > get_capacity(req->rq_disk))) {
+					pr_err("%s: bad access: block=%ld, count=%d\n", req->rq_disk->disk_name, block, nsect);
+					hd_end_request_entire(-EIO);
+					continue;
+				}
 			}
 		}
 
+		/* cache */
 		req = hd_req;
-
 		pi = dev_get_drvdata(((struct platform_device *)req->rq_disk->private_data)->dev.parent); /* TODO dev.parent->parent is n64pi?? cf. ipaq-micro-leds */
 		ncurbytes = blk_rq_cur_bytes(req);
 		pcurbuf = bio_data(req->bio);
@@ -132,7 +133,7 @@ static void hd_request(void)
 					}
 
 					/* this is second read: verify with first-read content. */
-					/* following block does "memcmp(verify_buffer, bio_data(req->bio), blk_rq_cur_bytes(req))" with showing diff */
+					/* following code block does "memcmp(verify_buffer, bio_data(req->bio), blk_rq_cur_bytes(req))" with showing diff */
 					{
 						int r = 0;
 						{
@@ -171,7 +172,7 @@ static void hd_request(void)
 #endif
 
 					/* acking issued blocks for kernel */
-					/* note: I am called from blk-core, it locks queue. __blk_end_request requires that. */
+					/* note: I am called from blk-core, it locks queue. hd_end_request requires that. */
 					hd_end_request(0, blk_rq_cur_bytes(req));
 #ifdef N64CART_VERIFY_READ
 					break; /* success, get out of this loop. */
@@ -208,8 +209,8 @@ static void hd_request(void)
 #ifdef DEBUG
 				// note: debug print AFTER reading status is important for ed64 console!
 				pr_info("%s: write_ed64_done: req=%p, disk=%ld+%Xh/%Xh, buffer=%p\n",
-				       hd_req->rq_disk->disk_name, hd_req, blk_rq_pos(hd_req),
-				       blk_rq_cur_bytes(hd_req), blk_rq_bytes(hd_req), bio_data(hd_req->bio));
+				       req->rq_disk->disk_name, req, blk_rq_pos(req),
+				       blk_rq_cur_bytes(req), blk_rq_bytes(req), bio_data(req->bio));
 #endif
 
 				if (n64pi_ed64_disable(pi) != N64PI_ERROR_SUCCESS) {
@@ -222,7 +223,7 @@ static void hd_request(void)
 				/* XXX there are no way to verify? read again?? blocking??? */
 
 				/* acking issued blocks for kernel */
-				/* note: I am called from blk-core, it locks queue. __blk_end_request requires that. */
+				/* note: I am called from blk-core, it locks queue. hd_end_request requires that. */
 				hd_end_request(0, blk_rq_cur_bytes(req));
 
 				n64pi_end(pi);
