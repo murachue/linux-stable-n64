@@ -275,6 +275,7 @@ n64pi_trybegin(struct n64pi *pi) {
 	}
 
 	if (pi->ongoing) {
+		/* this path should not be happened... */
 		spin_unlock_irqrestore(&pi->lock, flags);
 		return N64PI_ERROR_BUSY;
 	}
