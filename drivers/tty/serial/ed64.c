@@ -47,16 +47,8 @@
 
 #define ED64_POLL_DELAY (HZ * 100 / 1000) // 100ms
 
-enum ed64_poll_state {
-	POLL_NONE, // just tty rx/tx request
-	POLL_READING, // waiting for finishing ED64 USB-to-ROM DMA (rx)
-	POLL_WRITING, // waiting for finishing ED64 ROM-to-USB DMA (tx)
-	POLL_PIDMA, // waiting for finishing Cart/RAM PI DMA
-};
-
 struct ed64_private {
 	struct n64pi *pi; // n64pi arbitrator bound to the parent mfd device
-	enum ed64_poll_state poll_state; // poll (frequentry) for what
 	uint32_t rombase; // ROM area that is used for rx/tx (2048 bytes align required by ED64 DMA!)
 	uint32_t status; // last polled status
 	unsigned char __attribute((aligned(8))) xmitbuf[256]; // 255+1-bytes DMA buffer, NOTE: must be 8 bytes aligned (required by PI DMA)
@@ -76,123 +68,32 @@ static struct uart_driver ed64_uart = {
 
 static struct timer_list ed64_timer;
 
-/* TODO merge with n64cart */
-static int ed64_dummyread(struct list_head *list)
-{
-	struct n64pi_request *req;
-
-	req = n64pi_alloc_request(GFP_KERNEL);
-	if (!req) {
-		return 0;
-	}
-	req->type = N64PI_RTY_C2R_WORD;
-	req->cart_address = 0x08040000 + 0x00; // dummy read REG_CFG required!!
-	req->on_complete = n64pi_free_request;
-	req->on_error = n64pi_free_request;
-	//req->cookie = NULL;
-	list_add_tail(&req->node, list);
-	return 1;
+/* TODO merge with n64cart? */
+// FIXME bad n64pi_read_word interface... no error can be returned.
+static void ed64_dummyread(struct n64pi *pi) {
+	(void)n64pi_read_word(pi, 0x08040000 + 0x00);
 }
 
-static unsigned int ed64_regread(unsigned int regoff, void (*on_complete)(struct n64pi_request *req), void *cookie, struct list_head *list)
-{
-	struct n64pi_request *req;
+static uint32_t ed64_regread(struct n64pi *pi, unsigned int regoff) {
+	// FIXME bad n64pi_read_word interface... no error can be returned.
+	ed64_dummyread(pi); // dummy read required!!
 
-	if (!ed64_dummyread(list)) { // dummy read required!!
-		pr_err("%s: could not allocate n64pi_request for dummy_read\n", __func__);
-		return 0;
-	}
-
-	req = n64pi_alloc_request(GFP_KERNEL);
-	if (!req) {
-		pr_err("%s: could not allocate n64pi_request\n", __func__);
-
-		{
-			struct n64pi_request *pireq_dummyread;
-			pireq_dummyread = list_last_entry(list, struct n64pi_request, node);
-			list_del(&pireq_dummyread->node);
-			kfree(pireq_dummyread);
-		}
-
-		return 0;
-	}
-	req->type = N64PI_RTY_C2R_WORD;
-	req->cart_address = 0x08040000 + regoff;
-	req->on_complete = on_complete;
-	req->on_error = n64pi_free_request;
-	req->cookie = cookie;
-	list_add_tail(&req->node, list);
-	return 1;
+	// FIXME bad n64pi_read_word interface... no error can be returned.
+	return n64pi_read_word(pi, 0x08040000 + regoff);
 }
 
-static int ed64_regwrite(uint32_t value, unsigned int regoff, struct list_head *list)
-{
-	struct n64pi_request *req;
+static int ed64_regwrite(struct n64pi *pi, uint32_t value, unsigned int regoff) {
+	int ret;
 
-	if (!ed64_dummyread(list)) { // dummy read required!!
-		pr_err("%s: could not allocate n64pi_request for dummy_read\n", __func__);
-		return 0;
+	// FIXME bad n64pi_read_word interface... no error can be returned.
+	ed64_dummyread(pi); // dummy read required!!
+
+	if ((ret = n64pi_write_word(pi, 0x08040000 + regoff, value)) != N64PI_ERROR_SUCCESS) {
+		pr_err("%s: ed64_regwrite failed for %08x=%08x (%d)\n", __func__, regoff, value, ret);
+		return ret;
 	}
 
-	req = n64pi_alloc_request(GFP_KERNEL);
-	if (!req) {
-		pr_err("%s: could not allocate n64pi_request\n", __func__);
-
-		{
-			struct n64pi_request *pireq_dummyread;
-			pireq_dummyread = list_last_entry(list, struct n64pi_request, node);
-			list_del(&pireq_dummyread->node);
-			kfree(pireq_dummyread);
-		}
-
-		return 0;
-	}
-	req->type = N64PI_RTY_R2C_WORD;
-	req->cart_address = 0x08040000 + regoff;
-	req->value = value;
-	req->on_complete = n64pi_free_request;
-	req->on_error = n64pi_free_request;
-	//req->cookie = NULL;
-	list_add_tail(&req->node, list);
-	return 1;
-}
-
-static int ed64_able(enum n64pi_request_type type, struct list_head *list)
-{
-	struct n64pi_request *req;
-
-	req = n64pi_alloc_request(GFP_KERNEL);
-	if (!req) {
-		return 0;
-	}
-
-	req->type = type;
-	req->on_complete = n64pi_free_request;
-	req->on_error = n64pi_free_request;
-	//req->cookie = NULL;
-	list_add_tail(&req->node, list);
-
-	return 1;
-}
-
-static int ed64_enable(struct list_head *list)
-{
-	if (!ed64_able(N64PI_RTY_ED64_ENABLE, list)) {
-		pr_err("%s: could not allocate n64pi_request\n", __func__);
-		return 0;
-	}
-
-	return 1;
-}
-
-static int ed64_disable(struct list_head *list)
-{
-	if (!ed64_able(N64PI_RTY_ED64_DISABLE, list)) {
-		pr_err("%s: could not allocate n64pi_request\n", __func__);
-		return 0;
-	}
-
-	return 1;
+	return N64PI_ERROR_SUCCESS;
 }
 
 /**
@@ -269,138 +170,75 @@ static void ed64_stop_rx(struct uart_port *port)
  * @port: Ptr to the uart_port.
  * @break_state: Raise/Lower the break signal.
  *
- * The ED64 does not support this function.
+ * The ED64 currently does not support this function. TODO support with 0-byte sending
  */
 static void ed64_break_ctl(struct uart_port *port, int break_state)
 {
 }
 
-static void ed64_on_writepoll_complete(struct n64pi_request *req)
+static int ed64_tx(struct uart_port *port, int emit_error)
 {
-	struct uart_port *port = (struct uart_port *)req->cookie;
 	struct ed64_private *ed64 = (struct ed64_private *)port->private_data;
-	uint32_t pistatus = req->status;
-	uint32_t ed64status = req->value;
+	struct n64pi * const pi = ed64->pi;
 
-	kfree(req);
+	n64pi_begin(pi);
 
-	if ((pistatus & 7) != 0) {
-		pr_err("%s: read ED64 status failed status=%x\n", __func__, pistatus);
-		// will be retried by next timer
-		return;
-	}
-
-	ed64->status = ed64status;
-
-	if (ed64status & 1) {
-		// ED64 DMA is still running, poll that later (at timer handler).
-		return;
-	}
-
-	// ED64 DMA is done.
-	ed64->poll_state = POLL_NONE;
-}
-
-static int ed64_request_writetocart_async(struct uart_port *port);
-
-static void ed64_on_writedma_complete(struct n64pi_request *req)
-{
-	struct uart_port *port = (struct uart_port *)req->cookie;
-	struct ed64_private *ed64 = (struct ed64_private *)port->private_data;
-	uint32_t pistatus = req->status;
-	struct list_head reqs;
-
-	kfree(req);
-
-	// reset the poll_state for failing request allocation...
-	ed64->poll_state = POLL_NONE;
-
-	if ((pistatus & 7) != 0) {
-		pr_err("%s: DMA to cart failed status=%x; retrying\n", __func__, pistatus);
-
-		// re-issue DMA request
-		if (!ed64_request_writetocart_async(port)) {
-			pr_err("%s: retry failed!! dropping tty tx\n", __func__);
+	if (n64pi_ed64_enable(pi) != N64PI_ERROR_SUCCESS) {
+		if (emit_error) {
+			pr_err("%s: could not enable ed64regs\n", __func__);
 		}
-		// TODO disable ED64regs... but writetocart failure means ENOMEM, likely fail to it here too.
-		return;
+		goto err;
 	}
 
-	// we are the single user of ed64 fifo DMA, and we are not doing anything, so assuming fifo DMA is not running.
-	// let's rock.
-	INIT_LIST_HEAD(&reqs);
-	if (!ed64_enable(&reqs)) {
-		return;
-	}
-	if (!ed64_regwrite(512/512 - 1, 0x08, &reqs)) { // dmalen in 512bytes - 1
-		// TODO free reqs
-		return;
-	}
-	if (!ed64_regwrite(ed64->rombase / 2048, 0x0c, &reqs)) { // dmaaddr in 2048bytes
-		// TODO free reqs
-		return;
-	}
-	if (!ed64_regwrite(4, 0x14, &reqs)) { // dmacfg = 4(ram2fifo)
-		// TODO free reqs
-		return;
-	}
-	if (!ed64_regread(0x04, ed64_on_writepoll_complete, port, &reqs)) {
-		// TODO free reqs
-		return;
-	}
-	if (!ed64_disable(&reqs)) {
-		// TODO free reqs
-		return;
-	}
-
-	// requests allocated; we are trying to Cart-to-USB DMA, be "polling for write"
-	ed64->poll_state = POLL_WRITING;
-
-	n64pi_many_request_async(ed64->pi, &reqs);
-}
-
-static int ed64_request_writetocart_async(struct uart_port *port)
-{
-	struct ed64_private *ed64 = (struct ed64_private *)port->private_data;
-	struct list_head reqs;
-
-	INIT_LIST_HEAD(&reqs);
-	if (!ed64_enable(&reqs)) {
-		pr_err("%s: could not allocate n64pi_request for enable ed64regs\n", __func__);
-		return 0;
-	}
-	{
-		struct n64pi_request *pireq;
-
-		pireq = n64pi_alloc_request(GFP_KERNEL);
-		if (!pireq) {
-			pr_err("%s: could not allocate n64pi_request for Ram2Cart PI DMA\n", __func__);
-			// TODO free reqs
-			return 0;
+	/* ram(ed64->xbuf) -> cart */
+	// TODO variable length for shorter DMA time? but it is small enough...
+	if (n64pi_write_dma(pi, 0x10000000 + ed64->rombase, ed64->xmitbuf, 256) != N64PI_ERROR_SUCCESS) {
+		if (emit_error) {
+			pr_err("%s: DMA transfer error\n", __func__);
 		}
-
-		pireq->type = N64PI_RTY_R2C_DMA;
-		pireq->ram_vaddress = ed64->xmitbuf;
-		pireq->cart_address = 0x10000000 + ed64->rombase;
-		pireq->length = 256; // TODO variable for shorter DMA time? but it is small...
-		pireq->on_complete = ed64_on_writedma_complete;
-		pireq->on_error = n64pi_free_request; // TODO poll_state to POLL_NONE is required
-		pireq->cookie = port;
-
-		list_add_tail(&pireq->node, &reqs);
-	}
-	if (!ed64_disable(&reqs)) {
-		pr_err("%s: could not allocate n64pi_request for disable ed64regs\n", __func__);
-		// TODO free reqs
-		return 0;
+		goto err;
 	}
 
-	// we are Ram2Cart PI DMA, don't disturb n64pi by polling ed64 status.
-	ed64->poll_state = POLL_PIDMA;
+	if ((ed64->status = ed64_regread(pi, 0x04)) & 1) {
+		/* ED64 DMA is running!? */
+		if (emit_error) {
+			pr_warn("%s: ED64 DMA is already running that is unexpected... waiting for that.\n", __func__);
+		}
+		while ((ed64->status = ed64_regread(pi, 0x04)) & 1) {
+			/* ED64 DMA is running */
+		}
+	}
 
-	n64pi_many_request_async(ed64->pi, &reqs);
+	/* cart -> USB */
+	if (ed64_regwrite(pi, 512/512 - 1, 0x08) != N64PI_ERROR_SUCCESS) { // dmalen in 512bytes - 1
+		goto err;
+	}
+	if (ed64_regwrite(pi, ed64->rombase / 2048, 0x0c) != N64PI_ERROR_SUCCESS) { // dmaaddr in 2048bytes
+		goto err;
+	}
+	if (ed64_regwrite(pi, 4, 0x14) != N64PI_ERROR_SUCCESS) { // dmacfg = 4(ram2fifo)
+		goto err;
+	}
+	while ((ed64->status = ed64_regread(pi, 0x04)) & 1) {
+		/* ED64 DMA is running */
+	}
+
+	if (n64pi_ed64_disable(pi) != N64PI_ERROR_SUCCESS) {
+		if (emit_error) {
+			pr_err("%s: could not disable ed64regs\n", __func__);
+		}
+		goto err;
+	}
+
+	n64pi_end(pi);
 
 	return 1;
+
+err:
+	// must be ended even when error.
+	n64pi_end(pi);
+
+	return 0;
 }
 
 /**
@@ -454,7 +292,7 @@ static void ed64_write(struct uart_port *port)
 			port->icount.tx += count;
 		}
 
-		if (!ed64_request_writetocart_async(port)) {
+		if (!ed64_tx(port, 1)) {
 			return;
 		}
 	}
@@ -466,22 +304,62 @@ static void ed64_write(struct uart_port *port)
 		ed64_stop_tx(port);
 }
 
-static void ed64_on_readdma_complete(struct n64pi_request *req)
+/**
+ * ed64_read - Read chars from the ed64 fifo.
+ * @port: Ptr to the uart_port.
+ *
+ * This reads all available data from the ed64's fifo and pushes
+ * the data to the tty layer.
+ */
+static void ed64_read(struct uart_port *port)
 {
-	struct uart_port *port = (struct uart_port *)req->cookie;
+	// TODO avoid reentrant with ed64_write??
+	// TODO should timeout handling.
+
 	struct ed64_private *ed64 = (struct ed64_private *)port->private_data;
-	uint32_t pistatus = req->status;
+	struct n64pi * const pi = ed64->pi;
 
-	kfree(req);
+	n64pi_begin(pi);
 
-	// first, make poll for nothing anymore. no retry on failure. XXX do retry
-	ed64->poll_state = POLL_NONE;
-
-	if ((pistatus & 7) != 0) {
-		pr_err("%s: read ED64 rx buffer failed status=%x\n", __func__, pistatus);
-		// will be retried by next timer... TODO really?
-		return;
+	if (n64pi_ed64_enable(pi) != N64PI_ERROR_SUCCESS) {
+		goto err;
 	}
+
+	ed64->status = ed64_regread(pi, 0x04);
+	if (ed64->status & 1) {
+		// ED64 DMA is still running(!?)... poll read later (at timer handler).
+		// this is unexpected status, but recoverable.
+		pr_warn("%s: ED64 DMA is already running that is unexpected... poll later.\n", __func__);
+		goto err;
+	}
+
+	if (ed64_regwrite(pi, 512/512 - 1, 0x08) != N64PI_ERROR_SUCCESS) { // dmalen in 512bytes - 1
+		goto err;
+	}
+	if (ed64_regwrite(pi, ed64->rombase / 2048, 0x0c) != N64PI_ERROR_SUCCESS) { // dmaaddr in 2048bytes
+		goto err;
+	}
+	if (ed64_regwrite(pi, 3, 0x14) != N64PI_ERROR_SUCCESS) { // dmacfg = 3(fifo2ram)
+		goto err;
+	}
+
+	while ((ed64->status = ed64_regread(pi, 0x04)) & 1) {
+		/* ED64 DMA is running */
+	}
+
+	// ED64 DMA is done.
+
+	if (n64pi_ed64_disable(pi) != N64PI_ERROR_SUCCESS) {
+		goto err;
+	}
+
+	// Get rx buffer in ED64 ROM
+	if (n64pi_read_dma(pi, ed64->xmitbuf, 0x10000000 + ed64->rombase, 256) != N64PI_ERROR_SUCCESS) {
+		pr_err("%s: DMA transfer error\n", __func__);
+		goto err;
+	}
+
+	n64pi_end(pi);
 
 	{
 		const unsigned char *pbuf = ed64->xmitbuf; // that just be filled
@@ -549,105 +427,12 @@ static void ed64_on_readdma_complete(struct n64pi_request *req)
 			}
 		}
 	}
-}
 
-static void ed64_on_readpoll_complete(struct n64pi_request *req)
-{
-	struct uart_port *port = (struct uart_port *)req->cookie;
-	struct ed64_private *ed64 = (struct ed64_private *)port->private_data;
-	uint32_t pistatus = req->status;
-	uint32_t ed64status = req->value;
+	return;
 
-	kfree(req);
-
-	if ((pistatus & 7) != 0) {
-		pr_err("%s: read ED64 status failed status=%x\n", __func__, pistatus);
-		// will be retried by next timer
-		return;
-	}
-
-	ed64->status = ed64status;
-
-	if (ed64status & 1) {
-		// ED64 DMA is still running, poll that later (at timer handler).
-		// TODO this is unexpected status?
-		return;
-	}
-
-	// ED64 DMA is done.
-	// Get ED64 ROM rx buffer
-
-	// we are trying to DMA from cart to ram...
-	ed64->poll_state = POLL_PIDMA;
-
-	// note: no need to ed64_enable for cart read
-	{
-		struct n64pi_request *pireq;
-
-		pireq = n64pi_alloc_request(GFP_KERNEL);
-		if (!pireq) {
-			pr_err("%s: can't allocate n64pi_request for read rx\n", __func__);
-			// oops... give up rx. recover at better.
-			ed64->poll_state = POLL_NONE;
-			return;
-		}
-
-		pireq->type = N64PI_RTY_C2R_DMA;
-		pireq->cart_address = 0x10000000 + ed64->rombase;
-		pireq->ram_vaddress = ed64->xmitbuf;
-		pireq->length = 256;
-		pireq->on_complete = ed64_on_readdma_complete;
-		pireq->on_error = n64pi_free_request; // TODO poll_state to POLL_NONE is required
-		pireq->cookie = port;
-		n64pi_request_async(ed64->pi, pireq);
-	}
-}
-
-/**
- * ed64_read - Read chars from the ed64 fifo.
- * @port: Ptr to the uart_port.
- *
- * This reads all available data from the ed64's fifo and pushes
- * the data to the tty layer.
- */
-static void ed64_read(struct uart_port *port)
-{
-	// TODO avoid reentrant with ed64_write??
-	// TODO should timeout handling.
-
-	struct ed64_private *ed64 = (struct ed64_private *)port->private_data;
-	struct list_head reqs;
-
-	// let's rock.
-	INIT_LIST_HEAD(&reqs);
-	if (!ed64_enable(&reqs)) {
-		return;
-	}
-	if (!ed64_regwrite(512/512 - 1, 0x08, &reqs)) { // dmalen in 512bytes - 1
-		// TODO free reqs
-		return;
-	}
-	if (!ed64_regwrite(ed64->rombase / 2048, 0x0c, &reqs)) { // dmaaddr in 2048bytes
-		// TODO free reqs
-		return;
-	}
-	if (!ed64_regwrite(3, 0x14, &reqs)) { // dmacfg = 3(fifo2ram)
-		// TODO free reqs
-		return;
-	}
-	if (!ed64_regread(0x04, ed64_on_readpoll_complete, port, &reqs)) {
-		// TODO free reqs
-		return;
-	}
-	if (!ed64_disable(&reqs)) {
-		// TODO free reqs
-		return;
-	}
-
-	// requests allocated; we are trying to USB-to-Cart DMA, be "polling for read"
-	ed64->poll_state = POLL_READING;
-
-	n64pi_many_request_async(ed64->pi, &reqs);
+err:
+	n64pi_end(pi);
+	return;
 }
 
 /**
@@ -756,65 +541,40 @@ static int ed64_verify_port(struct uart_port *port, struct serial_struct *ser)
 	return 0;
 }
 
-static void ed64_on_status_complete(struct n64pi_request *req)
+static void ed64_status(struct uart_port *port)
 {
-	struct uart_port *port = (struct uart_port *)req->cookie;
 	struct ed64_private *ed64 = (struct ed64_private *)port->private_data;
-	uint32_t pistatus = req->status;
-	uint32_t ed64status = req->value;
+	struct n64pi * const pi = ed64->pi;
 
-	kfree(req);
+	n64pi_begin(pi);
 
-	if ((pistatus & 7) != 0) {
-		pr_err("%s: read ED64 status failed status=%x\n", __func__, pistatus);
-		return;
+	if (n64pi_ed64_enable(pi) != N64PI_ERROR_SUCCESS) {
+		goto err;
 	}
 
-	ed64->status = ed64status;
+	ed64->status = ed64_regread(pi, 0x04);
+
+	n64pi_end(pi);
 
 	// first dispatch follows.
 
 	// if DMABUSY is low (no ED64 DMA is running) and rxf# is low (=have rx), do read.
-	if(!(ed64status & 9)) {
+	if(!(ed64->status & 9)) {
 		ed64_read(port);
 	} else {
 		// calling ed64_read cause ED64 (USB) DMA... put tx in "else" block.
 
 		// if DMABUSY is low (no ED64 DMA is running) and txe# is low (=can tx), do write.
 		// almost call will do nothing because port have no enqueued chars.
-		if(!(ed64status & 5)) {
+		if(!(ed64->status & 5)) {
 			ed64_write(port);
 		}
 	}
-}
 
-static void ed64_status(struct uart_port *port)
-{
-	struct ed64_private *ed64 = (struct ed64_private *)port->private_data;
-	void (*on_complete)(struct n64pi_request *);
-	struct list_head reqs;
-
-	switch(ed64->poll_state) {
-	case POLL_NONE:    on_complete = ed64_on_status_complete; break;
-	case POLL_READING: on_complete = ed64_on_readpoll_complete; break;
-	case POLL_WRITING: on_complete = ed64_on_writepoll_complete; break;
-	case POLL_PIDMA:   return; // don't disturb n64pi while PI-DMA is enqueued/running by ed64tty.
-	}
-
-	INIT_LIST_HEAD(&reqs);
-	if (!ed64_enable(&reqs)) {
-		return;
-	}
-	if (!ed64_regread(0x04, on_complete, port, &reqs)) {
-		// TODO free reqs
-		return;
-	}
-	if (!ed64_disable(&reqs)) {
-		// TODO free reqs
-		return;
-	}
-
-	n64pi_many_request_async(ed64->pi, &reqs);
+	return;
+err:
+	n64pi_end(pi);
+	return;
 }
 
 /**
@@ -1034,7 +794,7 @@ static void ed64_console_write(struct console *co, const char *buf, unsigned cou
 	unsigned len = (255 < count) ? 255 : count; // min(count, 255)
 	ed64->xmitbuf[0] = len;
 	memcpy(ed64->xmitbuf + 1, buf, len);
-	if (!ed64_request_writetocart_async(&port)) {
+	if (!ed64_tx(&port, 0)) {
 		// error... but putting message cause recursive write. do nothing.
 	}
 }
@@ -1106,10 +866,8 @@ static int ed64_probe(struct platform_device *pdev)
 	/* initialize driver-internal data */
 	ed64 = kmalloc(sizeof(struct ed64_private), GFP_KERNEL);
 	ed64->pi = dev_get_drvdata(pdev->dev.parent); /* TODO dev.parent->parent is n64pi?? ipaq-micro-leds */
-	ed64->poll_state = POLL_NONE;
 	ed64->rombase = (0x04000000-0x0800); // TODO configurable or IORESOURCE_MEM/IO?
-	ed64->status = 0;
-	ed64->xmitbuf[0] = 0;
+	ed64->status = 0; /* TODO is 0 valid for initialize?? (seems ok, it means wrongly "can TX&RX", but overwritten by poll.) */
 
 	/* register a port in driver */
 	port.iobase = 0; // no I/O port
