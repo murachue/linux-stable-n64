@@ -268,14 +268,18 @@ EXPORT_SYMBOL_GPL(n64pi_begin);
 
 int
 n64pi_trybegin(struct n64pi *pi) {
-	if (!spin_trylock_irqsave(&pi->lock, pi->flags)) {
+	unsigned int flags; /* don't destroy pi->flags on cannot-get-lock. */
+
+	if (!spin_trylock_irqsave(&pi->lock, flags)) {
 		return N64PI_ERROR_BUSY;
 	}
 
 	if (pi->ongoing) {
-		spin_unlock_irqrestore(&pi->lock, pi->flags);
+		spin_unlock_irqrestore(&pi->lock, flags);
 		return N64PI_ERROR_BUSY;
 	}
+
+	pi->flags = flags; /* got lock, safe to overwrite. */
 
 	pi->ongoing = 1;
 
