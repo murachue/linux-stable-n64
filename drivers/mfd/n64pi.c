@@ -6,6 +6,8 @@
  * mainly for arbitrating their accesses.
  * Based on ipaq-micro.c.
  *
+ * TODO auto-probe ED64/64drive and enable its function only if it is probed.
+ *      requires moving ED64/64drive specific function to n64pi. (ie. from n64cart/ed64tty)
  * TODO nonblocking DMA support (introduce queue? how about before_dma and on_interrupt(after_dma)?)
  * TODO support 1FD00000-7FFFffff (Cartridge domain 1 address 3)?
  *
@@ -36,7 +38,7 @@ struct n64pi { /* represents the driver status of the PI device */
 	void __iomem *regbase; /* is a base virtual address of PI DMA registers (ie. 0xA4600000) */
 	void __iomem *membase; /* is a base virtual address of CPU word access to PI including SRAM/64DD/ROM area (ie. 0xA5000000) */
 	spinlock_t lock; /* is a lock for this state container */
-	int ongoing; /* holds boolean means n64pi is locked or not */
+	int ongoing; /* holds boolean means n64pi is locked or not (this have meaning only on UniProcessor that spoils spinlock) */
 	unsigned long flags; /* holds irq flags */
 	int ed64_enabled; /* holds current ED64 regs enabled count */
 };
