@@ -23,118 +23,10 @@ static DEFINE_SPINLOCK(hd_lock);
 static int n64cart_major;
 static struct request_queue *hd_queue;
 static struct request *hd_req;
-static void (*do_hd)(struct n64pi_request *pireq) = NULL;
-#ifdef N64CART_VERIFY_READ
-static void *debug_head512 = NULL; /* TODO remove "512" (it is not 512 bytes verify anymore...) */
-#endif
-
-#define SET_HANDLER(x) \
-	do { do_hd = (x); } while(0)
-
-// TODO merge with ed64tty, or remove completely
-#if 0
-static int ed64_dummyread(struct list_head *list)
-{
-	struct n64pi_request *req;
-
-	req = n64pi_alloc_request(GFP_NOIO);
-	if (!req) {
-		pr_err("%s: could not allocate n64pi_request\n", __func__);
-		return 0;
-	}
-	req->type = N64PI_RTY_C2R_WORD;
-	req->cart_address = 0x08040000 + 0x00; // dummy read REG_CFG required!!
-	req->on_complete = n64pi_free_request;
-	req->on_error = n64pi_free_request;
-	//req->cookie = NULL;
-	list_add_tail(&req->node, list);
-	return 1;
-}
-
-static unsigned int ed64_regread(unsigned int regoff, void (*on_complete)(struct n64pi_request *req), void *cookie, struct list_head *list)
-{
-	struct n64pi_request *req;
-
-	if (!ed64_dummyread(list)) { // dummy read required!!
-		pr_err("%s: could not allocate n64pi_request for dummy_read\n", __func__);
-		return 0;
-	}
-
-	req = n64pi_alloc_request(GFP_KERNEL);
-	if (!req) {
-		pr_err("%s: could not allocate n64pi_request\n", __func__);
-
-		{
-			struct n64pi_request *pireq_dummyread;
-			pireq_dummyread = list_last_entry(list, struct n64pi_request, node);
-			list_del(&pireq_dummyread->node);
-			kfree(pireq_dummyread);
-		}
-
-		return 0;
-	}
-	req->type = N64PI_RTY_C2R_WORD;
-	req->cart_address = 0x08040000 + regoff;
-	req->on_complete = on_complete;
-	req->on_error = n64pi_free_request;
-	req->cookie = cookie;
-	list_add_tail(&req->node, list);
-	return 1;
-}
-
-static int ed64_regwrite(uint32_t value, unsigned int regoff, struct list_head *list)
-{
-	struct n64pi_request *req;
-
-	if (!ed64_dummyread(list)) { // dummy read required!!
-		return 0;
-	}
-
-	req = n64pi_alloc_request(GFP_NOIO);
-	if (!req) {
-		pr_err("%s: could not allocate n64pi_request\n", __func__);
-
-		{
-			struct n64pi_request *pireq_dummyread;
-			pireq_dummyread = list_last_entry(list, struct n64pi_request, node);
-			list_del(&pireq_dummyread->node);
-			kfree(pireq_dummyread);
-		}
-
-		return 0;
-	}
-	req->type = N64PI_RTY_R2C_WORD;
-	req->cart_address = 0x08040000 + regoff;
-	req->value = value;
-	req->on_complete = n64pi_free_request;
-	req->on_error = n64pi_free_request;
-	//req->cookie = NULL;
-	list_add_tail(&req->node, list);
-	return 1;
-}
-#endif
-
-static int ed64_able(enum n64pi_request_type type, struct list_head *list)
-{
-	struct n64pi_request *req;
-
-	req = n64pi_alloc_request(GFP_NOIO);
-	if (!req) {
-		return 0;
-	}
-
-	req->type = type;
-	req->on_complete = n64pi_free_request;
-	req->on_error = n64pi_free_request;
-	//req->cookie = NULL;
-	list_add_tail(&req->node, list);
-
-	return 1;
-}
 
 static bool hd_end_request(int err, unsigned int bytes)
 {
-	/* note: I am called from hd_interrupt, it locks queue. __blk_end_request requires that. */
+	/* note: I am called from blk-core, it locks queue. __blk_end_request requires that. */
 	if (__blk_end_request(hd_req, err, bytes))
 		return true;
 	hd_req = NULL;
@@ -143,162 +35,10 @@ static bool hd_end_request(int err, unsigned int bytes)
 
 static bool hd_end_request_entire(int err)
 {
-	return hd_end_request(err, blk_rq_bytes(hd_req));
-}
-
-static void hd_request (void);
-
-static void unexpected_hd_intr(struct n64pi_request *pireq)
-{
-	pr_warn("%s:%d: spurious interrupt pireqtype=%d\n", __func__, __LINE__, pireq->type);
-}
-
-static void read_intr(struct n64pi_request *pireq)
-{
-	u32 status;
-	struct n64pi *pi;
-
-	/* check PI DMA error and retry if error. */
-	status = pireq->status;
-
-	pi = dev_get_drvdata(((struct platform_device *)hd_req->rq_disk->private_data)->dev.parent); /* TODO dev.parent->parent is n64pi?? ipaq-micro-leds */
-
-#ifdef DEBUG
-	// note: debug print AFTER reading status is important for ed64 console!
-	pr_info("%s: read_done: req=%p, disk=%ld+%Xh/%Xh, buffer=%p\n",
-	       hd_req->rq_disk->disk_name, hd_req, blk_rq_pos(hd_req),
-	       blk_rq_cur_bytes(hd_req), blk_rq_bytes(hd_req), bio_data(hd_req->bio));
-#endif
-
-	if((status & 7) != 0) {
-		pr_err("%s: PI read error status=%u for %ld+%Xh; retrying\n", hd_req->rq_disk->disk_name, status, blk_rq_pos(hd_req), blk_rq_cur_bytes(hd_req));
-		{
-			struct n64pi_request *pireq;
-			if (!(pireq = n64pi_alloc_request(GFP_NOIO))) {
-				pr_err("%s: can't alloc n64pi_request for resetting\n", hd_req->rq_disk->disk_name);
-			} else {
-				pireq->type = N64PI_RTY_RESET;
-				pireq->on_complete = n64pi_free_request;
-				pireq->on_error = n64pi_free_request;
-				n64pi_request_async(pi, pireq);
-			}
-		}
-	} else {
-#ifdef N64CART_VERIFY_READ
-		// verify: QUICK DIRTY HACK.
-		// seeing cached area.
-		if(debug_head512 == NULL) {
-			debug_head512 = kmalloc(blk_rq_cur_bytes(hd_req), GFP_NOIO);
-			memcpy(debug_head512, bio_data(hd_req->bio), blk_rq_cur_bytes(hd_req));
-			// don't modify hd_req and fall-through: retry (for verify)
-		} else {
-			int r;
-			{
-				const unsigned char *p = debug_head512, *q = bio_data(hd_req->bio);
-				int len = blk_rq_cur_bytes(hd_req);
-				const int atonce = 32;
-				char hexp[atonce*2+1], hexq[atonce*2+1];
-				while(0 < len) {
-					int rr = memcmp(p, q, atonce);
-					if(rr) {
-						int i;
-						for(i = 0; i < atonce; i++) {
-							sprintf(hexp + i * 2, "%02X", p[i]);
-							sprintf(hexq + i * 2, "%02X", q[i]);
-						}
-						pr_err("E+%03xh: %s %s\n", (unsigned)p - (unsigned)debug_head512, hexp, hexq);
-						r = 1; //break;
-					}
-					p += atonce;
-					q += atonce;
-					len -= atonce;
-				}
-			}
-
-			if(r /*memcmp(debug_head512, bio_data(hd_req->bio), blk_rq_cur_bytes(hd_req)) != 0*/) {
-				pr_err("%s: debug %p <=> read %ld+%Xh verify failed; retrying\n", hd_req->rq_disk->disk_name, debug_head512, blk_rq_pos(hd_req), blk_rq_cur_bytes(hd_req));
-				// remember again
-				memcpy(debug_head512, bio_data(hd_req->bio), blk_rq_cur_bytes(hd_req));
-				// don't modify hd_req and fall-through: retry (for verify)
-			} else {
-				kfree(debug_head512);
-				debug_head512 = NULL;
-#endif
-
-				/* acking issued blocks for kernel */
-				/* note: I am called from hd_interrupt, it locks queue. __blk_end_request requires that. */
-				if (!__blk_end_request(hd_req, 0, blk_rq_cur_bytes(hd_req))) {
-					/* completed whole request. make see next req. */
-					hd_req = NULL;
-				}
-#ifdef N64CART_VERIFY_READ
-			}
-		}
-#endif
-	}
-
-	/* do next bio or enqueued request */
-	hd_request();
-}
-
-static void write_ed64_intr(struct n64pi_request *pireq)
-{
-	u32 status;
-	struct n64pi *pi;
-
-	/* check PI DMA error and retry if error. */
-	status = pireq->status;
-
-	pi = dev_get_drvdata(((struct platform_device *)hd_req->rq_disk->private_data)->dev.parent); /* TODO dev.parent->parent is n64pi?? ipaq-micro-leds */
-
-#ifdef DEBUG
-	// note: debug print AFTER reading status is important for ed64 console!
-	pr_info("%s: write_ed64_done: req=%p, disk=%ld+%Xh/%Xh, buffer=%p\n",
-	       hd_req->rq_disk->disk_name, hd_req, blk_rq_pos(hd_req),
-	       blk_rq_cur_bytes(hd_req), blk_rq_bytes(hd_req), bio_data(hd_req->bio));
-#endif
-
-	if((status & 7) != 0) {
-		pr_err("%s: PI write error status=%u for %ld+%Xh; retrying\n", hd_req->rq_disk->disk_name, status, blk_rq_pos(hd_req), blk_rq_cur_bytes(hd_req));
-		// reset before retrying
-		{
-			struct n64pi_request *pireq;
-			if (!(pireq = n64pi_alloc_request(GFP_NOIO))) {
-				pr_err("%s: can't alloc n64pi_request for resetting\n", hd_req->rq_disk->disk_name);
-			} else {
-				pireq->type = N64PI_RTY_RESET;
-				pireq->on_complete = n64pi_free_request;
-				pireq->on_error = n64pi_free_request;
-				n64pi_request_async(pi, pireq);
-			}
-		}
-	} else {
-		/* XXX there are no way to verify? read again?? blocking??? */
-
-		/* acking issued blocks for kernel */
-		/* note: I am called from hd_interrupt, it locks queue. __blk_end_request requires that. */
-		if (!__blk_end_request(hd_req, 0, blk_rq_cur_bytes(hd_req))) {
-			/* completed whole request. make see next req. */
-			hd_req = NULL;
-		}
-	}
-
-	/* do next bio or enqueued request */
-	hd_request();
-}
-
-static void cart_on_complete(struct n64pi_request *pireq)
-{
-	void (*handler)(struct n64pi_request *pireq) = do_hd;
-
-	spin_lock(hd_queue->queue_lock);
-
-	do_hd = NULL;
-	if (!handler)
-		handler = unexpected_hd_intr;
-	handler(pireq);
-
-	spin_unlock(hd_queue->queue_lock);
+	int ret;
+	ret = hd_end_request(err, blk_rq_bytes(hd_req));
+	hd_req = NULL; /* it will be already done by hd_end_request... but ensure this. */
+	return ret;
 }
 
 /*
@@ -318,70 +58,126 @@ static void hd_request(void)
 	void *pcurbuf;
 	struct request *req;
 	struct n64pi *pi;
+	int ret;
 
-	/* do_hd != NULL means waiting read done interrupt, ex. block-queue issued too fast. */
-	if (do_hd)
-		return;
-
-repeat:
-	/* hd_req != NULL means we are processing a request partially. */
-	if (!hd_req) {
-		hd_req = blk_fetch_request(hd_queue);
+	for(;;) {
+		/* hd_req != NULL means we are processing a request partially. */
 		if (!hd_req) {
-			/* no more jobs. */
-			do_hd = NULL;
-			return;
+			hd_req = blk_fetch_request(hd_queue);
+			if (!hd_req) {
+				/* no more jobs. */
+				return;
+			}
+
+			/* verify this request is valid */
+			req = hd_req; /* cache */
+
+			block = blk_rq_pos(req);
+			nsect = blk_rq_sectors(req);
+			if (block >= get_capacity(req->rq_disk) || ((block+nsect) > get_capacity(req->rq_disk))) {
+				pr_err("%s: bad access: block=%ld, count=%d\n", req->rq_disk->disk_name, block, nsect);
+				hd_end_request_entire(-EIO);
+				continue;
+			}
 		}
-	}
-	req = hd_req;
 
-	block = blk_rq_pos(req);
-	nsect = blk_rq_sectors(req);
-	if (block >= get_capacity(req->rq_disk) || ((block+nsect) > get_capacity(req->rq_disk))) {
-		pr_err("%s: bad access: block=%ld, count=%d\n", req->rq_disk->disk_name, block, nsect);
-		hd_req = NULL;
-		hd_end_request_entire(-EIO);
-		goto repeat;
-	}
+		req = hd_req;
 
-	pi = dev_get_drvdata(((struct platform_device *)req->rq_disk->private_data)->dev.parent); /* TODO dev.parent->parent is n64pi?? ipaq-micro-leds */
-	ncurbytes = blk_rq_cur_bytes(req);
-	pcurbuf = bio_data(req->bio);
+		pi = dev_get_drvdata(((struct platform_device *)req->rq_disk->private_data)->dev.parent); /* TODO dev.parent->parent is n64pi?? cf. ipaq-micro-leds */
+		ncurbytes = blk_rq_cur_bytes(req);
+		pcurbuf = bio_data(req->bio);
 
 #ifdef DEBUG
-	pr_info("%s: %s req: req=%p, block=%ld, size=%Xh/%Xh, buffer=%p\n",
-		req->rq_disk->disk_name,
-		rq_data_dir(req) == READ ? "read" : "write",
-		req, block, ncurbytes, nsect * 512, pcurbuf);
+		pr_info("%s: %s req: req=%p, block=%ld, size=%Xh/%Xh, buffer=%p\n",
+			req->rq_disk->disk_name,
+			rq_data_dir(req) == READ ? "read" : "write",
+			req, block, ncurbytes, nsect * 512, pcurbuf);
 #endif
-	if (req->cmd_type == REQ_TYPE_FS) {
+		if (req->cmd_type != REQ_TYPE_FS) {
+			/* TODO should hd_end_request_entire?? */
+			continue;
+		}
+
 		switch (rq_data_dir(req)) {
 		case READ:
 			if(((unsigned int)pcurbuf & 7) != 0) {
 				pr_err("%s: buffer not aligned 8bytes: %p\n", req->rq_disk->disk_name, pcurbuf);
 			}
 			{
-				struct n64pi_request *pireq;
+#ifdef N64CART_VERIFY_READ
+				void *verify_buffer = NULL;
+#endif
 
-				pireq = kzalloc(sizeof(*pireq), GFP_NOIO);
-				if (!pireq) {
-					pr_err("%s: could not allocate n64pi_request\n", req->rq_disk->disk_name);
-					hd_req = NULL;
-					hd_end_request_entire(-ENOMEM);
-					break;
-				}
+				n64pi_begin(pi);
 
-				pireq->type = N64PI_RTY_C2R_DMA;
-				pireq->cart_address = 0x10000000 + block * 512;
-				pireq->ram_vaddress = pcurbuf;
-				pireq->length = ncurbytes;
-				pireq->on_complete = cart_on_complete;
-				pireq->on_error = n64pi_free_request;
-				//pireq->cookie = NULL;
+#ifdef N64CART_VERIFY_READ
+				for(;;) { /* loop until re-read content matches to pre-read. */
+#endif
+					while ((ret = n64pi_read_dma(pi, pcurbuf, 0x10000000 + block * 512, ncurbytes)) != N64PI_ERROR_SUCCESS) {
+						pr_err("%s: PI read error (%d) for %ld+%Xh; retrying\n", req->rq_disk->disk_name, ret, blk_rq_pos(req), blk_rq_cur_bytes(req));
+					}
 
-				SET_HANDLER(read_intr);
+#ifdef DEBUG
+					pr_info("%s: read_done: req=%p, disk=%ld+%Xh/%Xh, buffer=%p\n",
+					        req->rq_disk->disk_name, req, blk_rq_pos(req), blk_rq_cur_bytes(req), blk_rq_bytes(req), bio_data(req->bio));
+#endif
 
-				n64pi_request_async(pi, pireq);
+#ifdef N64CART_VERIFY_READ
+					// verify: QUICK DIRTY HACK.
+					if(verify_buffer == NULL) {
+						/* this is first read: copy read data to verify_buffer and re-read. */
+						verify_buffer = kmalloc(blk_rq_cur_bytes(req), GFP_NOIO);
+						memcpy(verify_buffer, bio_data(req->bio), blk_rq_cur_bytes(req));
+						continue; /* to re-read same area. */
+					}
+
+					/* this is second read: verify with first-read content. */
+					/* following block does "memcmp(verify_buffer, bio_data(req->bio), blk_rq_cur_bytes(req))" with showing diff */
+					{
+						int r = 0;
+						{
+							const unsigned char *p = verify_buffer, *q = bio_data(req->bio);
+							int len = blk_rq_cur_bytes(req);
+							const int atonce = 32;
+							char hexp[atonce*2+1], hexq[atonce*2+1];
+							while(0 < len) {
+								int rr = memcmp(p, q, atonce);
+								if(rr) {
+									int i;
+									for(i = 0; i < atonce; i++) {
+										sprintf(hexp + i * 2, "%02X", p[i]);
+										sprintf(hexq + i * 2, "%02X", q[i]);
+									}
+									pr_err("E+%03xh: %s %s\n", (unsigned)p - (unsigned)verify_buffer, hexp, hexq);
+									r = 1; //break;
+								}
+								p += atonce;
+								q += atonce;
+								len -= atonce;
+							}
+						}
+
+						if(r) {
+							pr_err("%s: debug %p <=> read %ld+%Xh verify failed; retrying\n", req->rq_disk->disk_name, verify_buffer, blk_rq_pos(req), blk_rq_cur_bytes(req));
+							// remember again
+							memcpy(verify_buffer, bio_data(req->bio), blk_rq_cur_bytes(req));
+							continue; /* to re-read same area. */
+						}
+					}
+
+					/* verify ok, forget first-read. */
+					kfree(verify_buffer);
+					verify_buffer = NULL;
+#endif
+
+					/* acking issued blocks for kernel */
+					/* note: I am called from blk-core, it locks queue. __blk_end_request requires that. */
+					hd_end_request(0, blk_rq_cur_bytes(req));
+#ifdef N64CART_VERIFY_READ
+				} /* end of "for(;;)" for verify */
+#endif
+
+				n64pi_end(pi);
 			}
 			break;
 		case WRITE:
@@ -395,58 +191,47 @@ repeat:
 				pr_err("%s: buffer not aligned 8bytes: %p\n", req->rq_disk->disk_name, pcurbuf);
 			}
 			{
-				struct list_head reqs;
-				struct n64pi_request *pireq;
+				n64pi_begin(pi);
 
-				INIT_LIST_HEAD(&reqs);
-
-				if (!ed64_able(N64PI_RTY_ED64_ENABLE, &reqs)) {
-					pr_err("%s: could not allocate n64pi_request (%d)\n", req->rq_disk->disk_name, __LINE__);
-					// TODO free reqs
-					hd_req = NULL;
+				if (n64pi_ed64_enable(pi) != N64PI_ERROR_SUCCESS) {
+					pr_err("%s: could not enable ED64 registers\n", req->rq_disk->disk_name);
 					hd_end_request_entire(-ENOMEM);
 					break;
 				}
 
-				pireq = n64pi_alloc_request(GFP_NOIO);
-				if (!pireq) {
-					pr_err("%s: could not allocate n64pi_request (%d)\n", req->rq_disk->disk_name, __LINE__);
-					// TODO free reqs
-					hd_req = NULL;
-					hd_end_request_entire(-ENOMEM);
-					break;
+				while ((ret = n64pi_write_dma(pi, 0x10000000 + block * 512, pcurbuf, ncurbytes)) != N64PI_ERROR_SUCCESS) {
+					pr_err("%s: PI write error (%d) for %ld+%Xh; retrying\n", req->rq_disk->disk_name, ret, blk_rq_pos(req), blk_rq_cur_bytes(req));
 				}
-				pireq->type = N64PI_RTY_R2C_DMA;
-				pireq->cart_address = 0x10000000 + block * 512;
-				pireq->ram_vaddress = pcurbuf;
-				pireq->length = ncurbytes;
-				pireq->on_complete = cart_on_complete;
-				pireq->on_error = n64pi_free_request;
-				//pireq->cookie = NULL;
-				list_add_tail(&pireq->node, &reqs);
 
-				// enqueue disable ED64regs just after write-DMA for safety
-				if (!ed64_able(N64PI_RTY_ED64_DISABLE, &reqs)) {
-					pr_err("%s: could not allocate n64pi_request (%d)\n", req->rq_disk->disk_name, __LINE__);
-					// TODO free reqs
-					hd_req = NULL;
+#ifdef DEBUG
+				// note: debug print AFTER reading status is important for ed64 console!
+				pr_info("%s: write_ed64_done: req=%p, disk=%ld+%Xh/%Xh, buffer=%p\n",
+				       hd_req->rq_disk->disk_name, hd_req, blk_rq_pos(hd_req),
+				       blk_rq_cur_bytes(hd_req), blk_rq_bytes(hd_req), bio_data(hd_req->bio));
+#endif
+
+				if (n64pi_ed64_disable(pi) != N64PI_ERROR_SUCCESS) {
+					pr_err("%s: could not disable ED64 registers\n", req->rq_disk->disk_name);
 					hd_end_request_entire(-ENOMEM);
 					break;
 				}
 
-				SET_HANDLER(write_ed64_intr);
+				/* XXX there are no way to verify? read again?? blocking??? */
 
-				n64pi_many_request_async(pi, &reqs);
+				/* acking issued blocks for kernel */
+				/* note: I am called from blk-core, it locks queue. __blk_end_request requires that. */
+				hd_end_request(0, blk_rq_cur_bytes(req));
+
+				n64pi_end(pi);
 			}
 #endif
 			break;
 		default:
 			pr_err("unknown hd-command\n");
-			hd_req = NULL;
 			hd_end_request_entire(-EIO);
 			break;
-		}
-	}
+		} /* switch(rq_data_dir(req)) */
+	} /* "for(;;)" for processing queue loop */
 }
 
 /* called from queue */
