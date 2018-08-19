@@ -270,6 +270,7 @@ static void ed64_write(struct uart_port *port)
 	}
 	*/
 
+	/* TODO don't return on xmitbuf[0] > 0 */
 	if(uart_circ_empty(xmit) || uart_tx_stopped(port)) {
 		ed64_stop_tx(port);
 		return;
@@ -556,7 +557,11 @@ static void ed64_status(struct uart_port *port)
 	struct ed64_private *ed64 = (struct ed64_private *)port->private_data;
 	struct n64pi * const pi = ed64->pi;
 
-	n64pi_begin(pi);
+	/* XXX FIXME I don't know why, but softirq->timer->here happen when n64cart is in n64pi-begin-end. */
+	if (n64pi_trybegin(pi) != N64PI_ERROR_SUCCESS) {
+		/* I dunno why... but this is retryable. skip for now. */
+		return;
+	}
 
 	if (n64pi_ed64_enable(pi) != N64PI_ERROR_SUCCESS) {
 		goto err;
