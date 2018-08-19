@@ -229,7 +229,7 @@ static void hd_request(void)
 #endif
 			break;
 		default:
-			pr_err("unknown hd-command\n");
+			pr_err("unknown REQ_TYPE_FS direction\n");
 			hd_end_request_entire(-EIO);
 			break;
 		} /* switch(rq_data_dir(req)) */
