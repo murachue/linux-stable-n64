@@ -487,8 +487,8 @@ static irqreturn_t n64pi_isr(int irq, void *dev_id)
 static const struct mfd_cell n64pi_cells[] = {
 	{ .name = "n64pi-cart", .of_compatible = "nintendo,pi-cart", },
 	{ .name = "n64pi-ed64tty", .of_compatible = "nintendo,pi-ed64tty" }, // TODO OF? CONFIG?
+	{ .name = "n64pi-ed64mmc", .of_compatible = "nintendo,pi-ed64mmc" }, // TODO OF? CONFIG?
 	// TODO 64drive tty support
-	// TODO mmc support
 };
 
 static int __init n64pi_probe(struct platform_device *pdev)

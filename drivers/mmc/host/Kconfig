@@ -785,3 +785,14 @@ config MMC_MTK
 	  If you have a machine with a integrated SD/MMC card reader, say Y or M here.
 	  This is needed if support for any SD/SDIO/MMC devices is required.
 	  If unsure, say N.
+
+config MMC_ED64
+	tristate "EverDrive-64 SD/MMC Card Interface support"
+	depends on NINTENDO64
+	depends on HAS_DMA
+	select MFD_NINTENDO64_PI
+	help
+	  This selects the EverDrive-64 Secure digital and Multimedia card Interface.
+	  If you want a SD/MMC card reader interface, say Y or M here.
+	  This is needed if support for any SD/SDIO/MMC devices is required.
+	  If unsure, say N.
