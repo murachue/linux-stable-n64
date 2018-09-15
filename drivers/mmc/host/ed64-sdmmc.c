@@ -25,10 +25,10 @@
 #error n64cart does not support device tree yet
 #endif
 
-/*
+/* enable dev_dbg? */
 #define DEBUG
 #define VERBOSE_DEBUG
-*/
+
 #include <linux/delay.h>
 #include <linux/highmem.h>
 #include <linux/module.h>
@@ -60,12 +60,12 @@
 #define ED64_STATUS_RXF     (1 << 3)
 #define ED64_STATUS_SPI     (1 << 4)
 
-#define ED64_SPICFG_SPD0  (1 << 0)
-#define ED64_SPICFG_SPD1  (1 << 1)
-#define ED64_SPICFG_SS    (1 << 2) /* raw slave_select, in SD/MMC this should be "set" (|0x04 = deasserted-SS). */
-#define ED64_SPICFG_RD    (1 << 3) /* 0=write 1=read */
-#define ED64_SPICFG_DAT   (1 << 4) /* 0=cmd 1=dat */
-#define ED64_SPICFG_PROBE (1 << 5) /* cmd1=1bit_left_shift_latch cmd0=8bit_latch dat1=4lines-1bit-data dat0=4lines-8bit-data */
+#define ED64_SPICFG_SPD0 (1 << 0)
+#define ED64_SPICFG_SPD1 (1 << 1)
+#define ED64_SPICFG_SS   (1 << 2) /* raw slave_select, in SD/MMC this should be "set" (|0x04 = deasserted-SS). */
+#define ED64_SPICFG_RD   (1 << 3) /* 0=write 1=read */
+#define ED64_SPICFG_DAT  (1 << 4) /* 0=cmd 1=dat */
+#define ED64_SPICFG_1BIT (1 << 5) /* cmd: 1=1bit_left_shift_latch=1bit 0=8bit_latch=8bits dat: 1=4lines-1bit-data=4bits 0=4lines-2bit-data=8bits */
 
 #define ED64_SPICFG_SPEED_MASK (ED64_SPICFG_SPD1 | ED64_SPICFG_SPD0)
 #define ED64_SPICFG_SPEED_INIT ED64_SPICFG_SPD1
@@ -113,11 +113,51 @@ static int ed64_regwrite(struct n64pi *pi, uint32_t value, unsigned int regoff) 
 	return N64PI_ERROR_SUCCESS;
 }
 
-/* TODO use linux/crc-ccitt.h:crc_ccitt_byte/crc_ccitt but this is little-endian crc, and for single line... */
-static void crc16_dat4_update(int (*crcs)[4], int byte) {
+// FIXME bad n64pi_read_word interface... no error can be returned.
+static void ed64_spiwait(struct n64pi *pi) {
+	while (ed64_regread(pi, ED64_REG_STATUS) & ED64_STATUS_DMABUSY) /*nothing*/ ; /* note: Yes, check DMABUSY bit. */
+}
+
+static int ed64_spiwrite(struct n64pi *pi, uint32_t value) {
+	int ret;
+
+	ed64_spiwait(pi); /* wait previous read/write */
+
+	if ((ret = ed64_regwrite(pi, value, ED64_REG_SPI)) != 0) {
+		return ret;
+	}
+
+	return 0;
+}
+static uint32_t ed64_spiread(struct n64pi *pi, uint32_t value) {
+	// FIXME bad n64pi_read_word interface... no error can be returned.
+	if (ed64_spiwrite(pi, value) != 0) {
+		return 0xFFFFffff;
+	}
+
+	ed64_spiwait(pi); /* wait above write */
+
+	return ed64_regread(pi, ED64_REG_SPI);
+}
+
+static int ed64_spicfg(struct ed64mmc_host *host, uint32_t cfg) {
+	struct n64pi *pi = host->pi;
+	int ret;
+
+	ed64_spiwait(pi); /* wait previous read/write */
+
+	if ((ret = ed64_regwrite(pi, cfg | host->spicfg, ED64_REG_SPICFG)) != 0) {
+		return ret;
+	}
+
+	return 0;
+}
+
+/* TODO use linux/crc-ccitt.h:crc_ccitt_byte/crc_ccitt but it is little-endian crc, and for single line... */
+static void crc16_2dat4_update(int (*crcs)[4], int byte) {
 	int i, d;
 
-	/* ED64 full 4bit DAT is: {DAT3 DAT2 DAT1 DAT0}[0] {DAT3 DAT2 DAT1 DAT0}[1] */
+	/* ED64 full 8bit DAT is (from MSbit): {DAT3 DAT2 DAT1 DAT0}[0] {DAT3 DAT2 DAT1 DAT0}[1] */
 	for (i = 0; i < 2; i++) {
 		for (d = 3; d >= 0; d--) {
 			int crc = (*crcs)[d];
@@ -140,13 +180,13 @@ static int ed64mmc_block_read(struct ed64mmc_host *host, u8 *buf, int len)
 	int readcrcs[4] = {0};
 	int i, d;
 
-	/* 4bit data read */
-	ed64_regwrite(pi, ED64_SPICFG_PROBE | ED64_SPICFG_DAT | ED64_SPICFG_RD | host->spicfg, ED64_REG_SPICFG);
+	/* 4lines-1bit data read */
+	ed64_spicfg(host, ED64_SPICFG_1BIT | ED64_SPICFG_DAT | ED64_SPICFG_RD);
 
 	/* seek for start bit */
 	for (i = TRANSFER_TIMEOUT; i; i--) {
-		ed64_regwrite(pi, 0xFF, ED64_REG_SPI); /* write something to clock, with previously received as 0x?F */
-		if ((ed64_regread(pi, ED64_REG_SPI) & 0xF1) == 0xF0) {
+		/* if DAT0(0-3 as spec...) is low: it's start-bit! */
+		if ((ed64_spiread(pi, 0xFF/* previously received as 0x?F */) & 0xF1) == 0xF0) {
 			break;
 		}
 	}
@@ -154,17 +194,16 @@ static int ed64mmc_block_read(struct ed64mmc_host *host, u8 *buf, int len)
 		return -ETIMEDOUT;
 	}
 
-	/* 8bit data read */
-	ed64_regwrite(pi, ED64_SPICFG_DAT | ED64_SPICFG_RD | host->spicfg, ED64_REG_SPICFG);
+	/* 4lines-2bit data read */
+	ed64_spicfg(host, ED64_SPICFG_DAT | ED64_SPICFG_RD);
 
 	/* read data */
 	for (i = 0; i < len; i++) {
 		u32 byte;
 
-		ed64_regwrite(pi, 0xFF, ED64_REG_SPI); /* write something to clock */
-		byte = ed64_regread(pi, ED64_REG_SPI);
+		byte = ed64_spiread(pi, 0xFF/* something to clock */);
 		*buf++ = byte;
-		crc16_dat4_update(&crcs, byte);
+		crc16_2dat4_update(&crcs, byte);
 	}
 
 	/* read DAT-individual crc16s (from ED64_REG_SPI perspective, seen as interleaved) */
@@ -172,8 +211,7 @@ static int ed64mmc_block_read(struct ed64mmc_host *host, u8 *buf, int len)
 		u32 byte;
 		int j;
 
-		ed64_regwrite(pi, 0xFF, ED64_REG_SPI); /* write something to clock */
-		byte = ed64_regread(pi, ED64_REG_SPI);
+		byte = ed64_spiread(pi, 0xFF/* something to clock */);
 		for (j = 0; j < 2; j++) {
 			for (d = 3; d >= 0; d--) {
 				readcrcs[d] <<= 1;
@@ -182,6 +220,8 @@ static int ed64mmc_block_read(struct ed64mmc_host *host, u8 *buf, int len)
 			}
 		}
 	}
+
+	/* TODO read end bit? */
 
 	/* verify crcs */
 	for (d = 0; d < 4; d++) {
@@ -200,17 +240,17 @@ static int ed64mmc_block_write(struct ed64mmc_host *host, const u8 *buf, int len
 	int i, j, d, resp;
 
 	/* 8bit data write */
-	ed64_regwrite(pi, ED64_SPICFG_DAT | host->spicfg, ED64_REG_SPICFG);
+	ed64_spicfg(host, ED64_SPICFG_DAT);
 
 	/* stable then put start bit on 4 DATs */
-	ed64_regwrite(pi, 0xFF, ED64_REG_SPI);
-	ed64_regwrite(pi, 0xF0, ED64_REG_SPI);
+	ed64_spiwrite(pi, 0xFF);
+	ed64_spiwrite(pi, 0xF0);
 
 	/* write data with crc16 calc */
 	for (i = 0; i < len; i++) {
 		u32 byte = *buf++;
-		ed64_regwrite(pi, byte, ED64_REG_SPI);
-		crc16_dat4_update(&crcs, byte);
+		ed64_spiwrite(pi, byte);
+		crc16_2dat4_update(&crcs, byte);
 	}
 
 	/* write DAT-individual crc16 */
@@ -223,22 +263,22 @@ static int ed64mmc_block_write(struct ed64mmc_host *host, const u8 *buf, int len
 				crcs[d] <<= 1;
 			}
 		}
-		ed64_regwrite(pi, byte, ED64_REG_SPI);
+		ed64_spiwrite(pi, byte);
 	}
 
 	/* send stop bit(s) */
-	/* 4bit data write */
-	ed64_regwrite(pi, ED64_SPICFG_PROBE | ED64_SPICFG_DAT | host->spicfg, ED64_REG_SPICFG);
-	ed64_regwrite(pi, 0xFF, ED64_REG_SPI);
+	/* 4lines-1bit data write */
+	ed64_spicfg(host, ED64_SPICFG_1BIT | ED64_SPICFG_DAT);
+	ed64_spiwrite(pi, 0xFF);
 
 	/* wait for write completion at card */
-	/* 4bit data read */
-	ed64_regwrite(pi, ED64_SPICFG_PROBE | ED64_SPICFG_DAT | ED64_SPICFG_RD | host->spicfg, ED64_REG_SPICFG);
+	/* 4lines-1bit data read */
+	ed64_spicfg(host, ED64_SPICFG_1BIT | ED64_SPICFG_DAT | ED64_SPICFG_RD);
 
 	/* seek for DAT0 response start bit...?? TODO where is this spec? I could find only SPI control token... but this is SD mode. */
 	for (i = TRANSFER_TIMEOUT; i; i--) {
-		ed64_regwrite(pi, 0xFF, ED64_REG_SPI); /* write something to clock, with previously received as 0x?F */
-		if ((ed64_regread(pi, ED64_REG_SPI) & 1) == 0) {
+		/* DAT0 is low: complete...??? */
+		if ((ed64_spiread(pi, 0xFF/* previously received as 0x?F */) & 1) == 0) {
 			break;
 		}
 	}
@@ -250,8 +290,7 @@ static int ed64mmc_block_write(struct ed64mmc_host *host, const u8 *buf, int len
 	resp = 0;
 	for (i = 0; i < 3; i++) {
 		resp <<= 1;
-		ed64_regwrite(pi, 0xFF, ED64_REG_SPI); /* write something to clock, with previously received as 0x?F */
-		resp |= ed64_regread(pi, ED64_REG_SPI) & 1;
+		resp |= ed64_spiread(pi, 0xFF/* previously received as 0x?F */) & 1;
 	}
 
 	if (resp == 0x05) {
@@ -267,11 +306,10 @@ static int ed64mmc_block_write(struct ed64mmc_host *host, const u8 *buf, int len
 
 	/* wait for end of busy...?? */
 	/* 8bit data read */
-	ed64_regwrite(pi, ED64_SPICFG_DAT | ED64_SPICFG_RD | host->spicfg, ED64_REG_SPICFG);
-	ed64_regwrite(pi, 0xFF, ED64_REG_SPI); /* write something to clock */
+	ed64_spicfg(host, ED64_SPICFG_DAT | ED64_SPICFG_RD);
+	ed64_spiwrite(pi, 0xFF); /* write something to clock...?? */
 	for (i = TRANSFER_TIMEOUT * 2; i; i--) { /* TODO twice is just ED64 does... have some mean? */
-		ed64_regwrite(pi, 0xFF, ED64_REG_SPI); /* write something to clock, with previously received as 0x?F */
-		if ((ed64_regread(pi, ED64_REG_SPI) & 0xFF) == 0xFF) {
+		if ((ed64_spiread(pi, 0xFF/* previously received as 0x?F */) & 0xFF) == 0xFF) {
 			break;
 		}
 	}
@@ -283,6 +321,7 @@ static int ed64mmc_block_write(struct ed64mmc_host *host, const u8 *buf, int len
 }
 
 /* already 1bit left shifted crc7. TODO use linux/crc7.h:crc7_be_byte (this is 1ls too); dont forget selects CRC7 */
+/* NOTE only lower 8bit(or more concretely, [7:1]bit) is valid, and other are undefined. you must care [(63|31):8] when use. */
 static int crc7_update(int crc, int byte) {
 	int i;
 
@@ -306,92 +345,111 @@ static void ed64mmc_request(struct mmc_host *mmc, struct mmc_request *mrq)
 	struct n64pi *pi = host->pi;
 
 	dev_dbg(dev, "=============================\n");
-	dev_dbg(dev, "ed64mmc_request opcode=%i\n", cmd->opcode);
+	dev_dbg(dev, "ed64mmc_request opcode=%i arg=%08X spicfg=%02X data=%p\n", cmd->opcode, cmd->arg, host->spicfg, data);
 
 	n64pi_begin(pi);
 
 	n64pi_ed64_enable(pi);
 
 	/* 8bit command write */
-	ed64_regwrite(pi, host->spicfg, ED64_REG_SPICFG);
+	ed64_spicfg(host, 0);
 
 	{
 		u8 opbyte = 0x40 | cmd->opcode;
 		u32 arg = cmd->arg;
 		int i, crc;
 
-		ed64_regwrite(pi, opbyte, ED64_REG_SPI);
+		ed64_spiwrite(pi, 0xFF); /* dummy clock */
+
+		ed64_spiwrite(pi, opbyte);
 		crc = crc7_update(0, opbyte);
 
 		for (i = 0; i < 4; i++) {
 			int abyte = (arg >> 24) & 0xFF;
-			ed64_regwrite(pi, abyte, ED64_REG_SPI);
+			ed64_spiwrite(pi, abyte);
 			crc = crc7_update(crc, abyte);
 			arg <<= 8;
 		}
 
-		ed64_regwrite(pi, crc | 1, ED64_REG_SPI);
+//		dev_dbg(dev, "crc=%02X\n", crc | 1);
+		ed64_spiwrite(pi, crc | 1);
 	}
 
-	/* read response buffer */
-	if (cmd->flags & MMC_RSP_PRESENT) {
+	/* read response buffer, or just clock when opcode==0 */
+	if ((cmd->flags & MMC_RSP_PRESENT) || (cmd->opcode == 0)) {
 		/* read response */
-		unsigned int bits = 0xFF; /* fill with all 1s is important */
+		u32 bits = 0xFF; /* fill with all 1s is important */
 		int try;
 
 		/* 1bit command read */
-		ed64_regwrite(pi, ED64_SPICFG_PROBE | ED64_SPICFG_RD | host->spicfg, ED64_REG_SPICFG);
+		ed64_spicfg(host, ED64_SPICFG_1BIT | ED64_SPICFG_RD);
 
 		/* seek for start-bit and transmission-bit */
 		for (try = CMD_TIMEOUT; try; try--) {
-			ed64_regwrite(pi, bits, ED64_REG_SPI);
-			bits = ed64_regread(pi, ED64_REG_SPI); /* data magically shifts in from lsb */
+//			u32 obits = bits;
+			bits = ed64_spiread(pi, bits/* previously received */); /* data magically shifts in from lsb */
 			if ((bits & 0xC0) == 0) {
 				/* found start-bit and transmission-bit! */
+//				dev_dbg(dev, "start-bit found: %08X->%08X\n", obits, bits);
+				/* convert into byte (strip out ED64 status in high halfword) to comparable with cmd->opcode */
+				bits &= 0xFF;
 				break;
 			}
 		}
 
 		if (try == 0) {
-			cmd->error = -ETIMEDOUT;
-		} else if (bits != cmd->opcode) {
+			if (cmd->opcode != 0) {
+				cmd->error = -ETIMEDOUT;
+			}
+		} else if ((cmd->flags & MMC_RSP_OPCODE) && (bits != cmd->opcode)) {
+			dev_dbg(dev, "mis opcode echo: exp=%02X act=%02X\n", cmd->opcode, bits);
 			cmd->error = -EILSEQ;
 		}
 
-		/* receive response and crc if not timed out (but incl. invalid opcode echo) */
+		dev_dbg(dev, "expect response or cmd0; try=%d first_err=%d\n", try, cmd->error);
+
+		/* receive response and crc if not timed out (but incl. invalid opcode echo, excl. timeout with opcode==0) */
 		if (try != 0) {
 			int rwords = (cmd->flags & MMC_RSP_136) ? 4 : 1;
 			int i, j, crc = (cmd->flags & MMC_RSP_136) ? 0 : crc7_update(0, bits);
 
 			/* 8bit command read */
-			ed64_regwrite(pi, ED64_SPICFG_RD | host->spicfg, ED64_REG_SPICFG);
+			ed64_spicfg(host, ED64_SPICFG_RD);
 
 			/* read response word(s) */
 			for (i = 0; i < rwords; i++) {
 				uint32_t word = 0;
 				for (j = 0; j < 4; j++) {
-					int rbyte;
-					ed64_regwrite(pi, 0xFF, ED64_REG_SPI); /* write something to clock */
-					rbyte	= ed64_regread(pi, ED64_REG_SPI) & 0xFF;
+					u32 rbyte;
+					rbyte	= ed64_spiread(pi, 0xFF/* something to clock */) & 0xFF;
 					word = (word << 8) | rbyte;
 					crc = crc7_update(crc, rbyte);
 				}
 				cmd->resp[i] = word;
 			}
 
+			dev_dbg(dev, " response0=%08X\n", cmd->resp[0]);
+
 			/* read crc and test it if required */
 			{
 				int trail;
 
-				ed64_regwrite(pi, 0xFF, ED64_REG_SPI); /* write something to clock */
-				trail	= ed64_regread(pi, ED64_REG_SPI) & 0xFF;
+				trail	= ed64_spiread(pi, 0xFF/* something to clock */) & 0xFF;
+
+				/* note: R3 runs this but useless. */
+				if (cmd->flags & MMC_RSP_136) {
+					trail = cmd->resp[3] & 0xFF;
+				}
 
 				if ((cmd->flags & MMC_RSP_CRC) && (trail != (crc | 1))) {
 					/* crc error */
 					cmd->error = -EIO;
+					dev_dbg(dev, " found crc error: expect=%02X actual=%02X\n", crc | 1, trail);
 				}
 			}
 		}
+	} else {
+		dev_dbg(dev, "expect no response\n");
 	}
 
 	/* transfer data */
@@ -420,8 +478,10 @@ static void ed64mmc_request(struct mmc_host *mmc, struct mmc_request *mrq)
 				dev_err(dev, "ed64mmc_request: cmd %i block transfer failed\n", cmd->opcode);
 				cmd->error = result;
 				break;
-			} else
+			} else {
+				dev_dbg(dev, "transfer ok: %x bytes\n", len);
 				data->bytes_xfered += len;
+			}
 		}
 	}
 
@@ -436,7 +496,7 @@ static void ed64mmc_request(struct mmc_host *mmc, struct mmc_request *mrq)
 static void ed64mmc_set_ios(struct mmc_host *mmc, struct mmc_ios *ios)
 {
 	struct ed64mmc_host *host = mmc_priv(mmc);
-	dev_dbg(host->dev, "set_ios\n");
+	dev_dbg(host->dev, "set_ios pm=%d bw=%d clk=%d cs=%d\n", ios->power_mode, ios->bus_width, ios->clock, ios->chip_select);
 
 	if (ios->power_mode != MMC_POWER_ON) {
 		/* in UNDEFINED, OFF, and UP state are ignored. */
@@ -468,7 +528,14 @@ static void ed64mmc_set_ios(struct mmc_host *mmc, struct mmc_ios *ios)
 		host->spicfg &= ~ED64_SPICFG_SS;
 	} /* note: DONTCARE literally does not care. */
 
-	ed64_regwrite(host->pi, host->spicfg, ED64_REG_SPICFG);
+	{
+		struct n64pi *pi = host->pi;
+		n64pi_begin(pi);
+		n64pi_ed64_enable(pi);
+		ed64_spicfg(host, 0);
+		n64pi_ed64_disable(pi);
+		n64pi_end(pi);
+	}
 }
 
 static struct mmc_host_ops ed64mmc_ops = {
@@ -508,7 +575,7 @@ static int ed64mmc_probe(struct platform_device *pdev)
 	mmc->f_min = 400000; /* TODO how speed of SPEED_INIT is? mmc core use "100000~400000" */
 	mmc->f_max = 25000000; /* TODO "50" is defined but not used. be conservative. */
 	mmc->ocr_avail = MMC_VDD_32_33 | MMC_VDD_33_34; /* TODO I don't know about voltage on EverDrive... */
-	mmc->caps |= MMC_CAP_4_BIT_DATA; /* TODO I don't know much about mmc subsystem... stay left as sdricoh. */
+	mmc->caps |= MMC_CAP_4_BIT_DATA | MMC_CAP_NEEDS_POLL; /* TODO I don't know much about mmc subsystem... stay left as sdricoh. */
 
 	mmc->max_seg_size = 4 * 512;
 	mmc->max_blk_size = 512;
