@@ -411,7 +411,7 @@ static void ed64mmc_request(struct mmc_host *mmc, struct mmc_request *mrq)
 		/* receive response and crc if not timed out (but incl. invalid opcode echo, excl. timeout with opcode==0) */
 		if (try != 0) {
 			int rwords = (cmd->flags & MMC_RSP_136) ? 4 : 1;
-			int i, j, crc = (cmd->flags & MMC_RSP_136) ? 0 : crc7_update(0, bits);
+			int i, j, crc = 0, ncrc = (cmd->flags & MMC_RSP_136) ? 0 : crc7_update(0, bits);
 
 			/* 8bit command read */
 			ed64_spicfg(host, ED64_SPICFG_RD);
@@ -423,7 +423,8 @@ static void ed64mmc_request(struct mmc_host *mmc, struct mmc_request *mrq)
 					u32 rbyte;
 					rbyte	= ed64_spiread(pi, 0xFF/* something to clock */) & 0xFF;
 					word = (word << 8) | rbyte;
-					crc = crc7_update(crc, rbyte);
+					crc = ncrc;
+					ncrc = crc7_update(ncrc, rbyte);
 				}
 				cmd->resp[i] = word;
 			}
@@ -439,6 +440,10 @@ static void ed64mmc_request(struct mmc_host *mmc, struct mmc_request *mrq)
 				/* note: R3 runs this but useless. */
 				if (cmd->flags & MMC_RSP_136) {
 					trail = cmd->resp[3] & 0xFF;
+					/* note: crc must be kept as previous of ncrc. */
+				} else {
+					/* advance crc (including last response byte) */
+					crc = ncrc;
 				}
 
 				if ((cmd->flags & MMC_RSP_CRC) && (trail != (crc | 1))) {
