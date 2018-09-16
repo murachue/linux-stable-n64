@@ -176,9 +176,11 @@ static void crc16_2dat4_update(int (*crcs)[4], int byte) {
 static int ed64mmc_block_read(struct ed64mmc_host *host, u8 *buf, int len)
 {
 	struct n64pi *pi = host->pi;
+	int onebit = (host->datwidth == 0);
 	int crcs[4] = {0};
 	int readcrcs[4] = {0};
 	int i, d;
+int starttime;
 
 	/* 4lines-1bit data read */
 	ed64_spicfg(host, ED64_SPICFG_1BIT | ED64_SPICFG_DAT | ED64_SPICFG_RD);
@@ -186,24 +188,39 @@ static int ed64mmc_block_read(struct ed64mmc_host *host, u8 *buf, int len)
 	/* seek for start bit */
 	for (i = TRANSFER_TIMEOUT; i; i--) {
 		/* if DAT0(0-3 as spec...) is low: it's start-bit! */
-		if ((ed64_spiread(pi, 0xFF/* previously received as 0x?F */) & 0xF1) == 0xF0) {
+		if ((ed64_spiread(pi, 0xFF/* previously received as 0x?F */) & 1) == 0) {
 			break;
 		}
 	}
 	if (i == 0) {
 		return -ETIMEDOUT;
 	}
+starttime=TRANSFER_TIMEOUT-i;
 
 	/* 4lines-2bit data read */
 	ed64_spicfg(host, ED64_SPICFG_DAT | ED64_SPICFG_RD);
 
 	/* read data */
-	for (i = 0; i < len; i++) {
-		u32 byte;
+	{
+		int cnt = len * (onebit ? 4 : 1); /* in 1bit mode, required 4 times. */
+		unsigned int bbuf = 0;
+		u8 *p = buf; /* FIXME DEBUG keep buf to dump on panic */
 
-		byte = ed64_spiread(pi, 0xFF/* something to clock */);
-		*buf++ = byte;
-		crc16_2dat4_update(&crcs, byte);
+		for (i = 0; i < cnt; i++) {
+			u32 byte;
+
+			byte = ed64_spiread(pi, 0xFF/* something to clock */);
+			if (onebit) {
+				bbuf <<= 2;
+				bbuf |= (((byte >> 4) & 1) << 1) | (byte & 1);
+				if (i % 4 == 3) {
+					*p++ = bbuf; /* write low 8bit */
+				}
+			} else {
+				*p++ = byte;
+			}
+			crc16_2dat4_update(&crcs, byte);
+		}
 	}
 
 	/* read DAT-individual crc16s (from ED64_REG_SPI perspective, seen as interleaved) */
@@ -224,10 +241,20 @@ static int ed64mmc_block_read(struct ed64mmc_host *host, u8 *buf, int len)
 	/* TODO read end bit? */
 
 	/* verify crcs */
-	for (d = 0; d < 4; d++) {
-		if (crcs[d] != readcrcs[d]) {
-			return -EIO;
+	for (d = 0; d < (onebit ? 1 : 4); d++) {
+		if (crcs[d] == readcrcs[d]) {
+			continue;
 		}
+
+		if (onebit) {
+			panic("ed64mmcbr: crc1 mismatch e=%04x a=%04x @%p st=%d\n", crcs[0], readcrcs[0], buf, starttime);
+		} else {
+			pr_debug("ed64mmcbr: crc4 mismatch e=%04x.%04x.%04x.%04x a=%04x.%04x.%04x.%04x\n",
+							 crcs[0], crcs[1], crcs[2], crcs[3],
+							 readcrcs[0], readcrcs[1], readcrcs[2], readcrcs[3]
+							);
+		}
+		return -EIO;
 	}
 
 	return 0;
@@ -246,6 +273,7 @@ static int ed64mmc_block_write(struct ed64mmc_host *host, const u8 *buf, int len
 	ed64_spiwrite(pi, 0xFF);
 	ed64_spiwrite(pi, 0xF0);
 
+	/* TODO support 1-bit width */
 	/* write data with crc16 calc */
 	for (i = 0; i < len; i++) {
 		u32 byte = *buf++;
