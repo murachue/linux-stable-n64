@@ -121,11 +121,11 @@ static void ed64_spiwait(struct n64pi *pi) {
 static int ed64_spiwrite(struct n64pi *pi, uint32_t value) {
 	int ret;
 
-	ed64_spiwait(pi); /* wait previous read/write */
-
 	if ((ret = ed64_regwrite(pi, value, ED64_REG_SPI)) != 0) {
 		return ret;
 	}
+
+	ed64_spiwait(pi); /* wait previous read/write */
 
 	return 0;
 }
@@ -135,16 +135,12 @@ static uint32_t ed64_spiread(struct n64pi *pi, uint32_t value) {
 		return 0xFFFFffff;
 	}
 
-	ed64_spiwait(pi); /* wait above write */
-
 	return ed64_regread(pi, ED64_REG_SPI);
 }
 
 static int ed64_spicfg(struct ed64mmc_host *host, uint32_t cfg) {
 	struct n64pi *pi = host->pi;
 	int ret;
-
-	ed64_spiwait(pi); /* wait previous read/write */
 
 	if ((ret = ed64_regwrite(pi, cfg | host->spicfg, ED64_REG_SPICFG)) != 0) {
 		return ret;
