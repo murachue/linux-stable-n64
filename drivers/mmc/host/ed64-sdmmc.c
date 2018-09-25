@@ -88,7 +88,7 @@ struct ed64mmc_host {
 /* TODO merge with n64cart? */
 // FIXME bad n64pi_read_word interface... no error can be returned.
 static void ed64_dummyread(struct n64pi *pi) {
-	(void)n64pi_read_word(pi, 0x08040000 + 0x00);
+	(void)n64pi_read_word_unsafefast(pi, 0x08040000 + 0x00);
 }
 
 static uint32_t ed64_regread(struct n64pi *pi, unsigned int regoff) {
@@ -96,19 +96,23 @@ static uint32_t ed64_regread(struct n64pi *pi, unsigned int regoff) {
 	ed64_dummyread(pi); // dummy read required!!
 
 	// FIXME bad n64pi_read_word interface... no error can be returned.
-	return n64pi_read_word(pi, 0x08040000 + regoff);
+	return n64pi_read_word_unsafefast(pi, 0x08040000 + regoff);
 }
 
 static int ed64_regwrite(struct n64pi *pi, uint32_t value, unsigned int regoff) {
-	int ret;
+	//int ret;
 
 	// FIXME bad n64pi_read_word interface... no error can be returned.
 	ed64_dummyread(pi); // dummy read required!!
 
-	if ((ret = n64pi_write_word(pi, 0x08040000 + regoff, value)) != N64PI_ERROR_SUCCESS) {
+	// unsafefast never errors...
+	/*
+	if ((ret = n64pi_write_word_unsafefast(pi, 0x08040000 + regoff, value)) != N64PI_ERROR_SUCCESS) {
 		pr_err("%s: ed64_regwrite failed for %08x=%08x (%d)\n", __func__, regoff, value, ret);
 		return ret;
 	}
+	*/
+	n64pi_write_word_unsafefast(pi, 0x08040000 + regoff, value);
 
 	return N64PI_ERROR_SUCCESS;
 }
@@ -138,11 +142,19 @@ static uint32_t ed64_spiread(struct n64pi *pi, uint32_t value) {
 	return ed64_regread(pi, ED64_REG_SPI);
 }
 
-static int ed64_spicfg(struct ed64mmc_host *host, uint32_t cfg) {
+static int ed64_spicfg(struct ed64mmc_host *host, uint32_t cfg, int cmdwithdat) {
 	struct n64pi *pi = host->pi;
+	int spicfg = cfg | host->spicfg;
 	int ret;
 
-	if ((ret = ed64_regwrite(pi, cfg | host->spicfg, ED64_REG_SPICFG)) != 0) {
+	/* ED64 cannot latch both CMD and DAT*. To avoid losing beginning of DAT*, its preceding CMD must be sent with faster clock. */
+	/* TODO I think this highly depends on SD card... */
+	if (cmdwithdat && ((spicfg & ED64_SPICFG_SPEED_MASK) == ED64_SPICFG_SPEED_INIT)) {
+		spicfg &= ~ED64_SPICFG_SPEED_MASK;
+		spicfg |= ED64_SPICFG_SPEED_25;
+	}
+
+	if ((ret = ed64_regwrite(pi, spicfg, ED64_REG_SPICFG)) != 0) {
 		return ret;
 	}
 
@@ -179,7 +191,7 @@ static int ed64mmc_block_read(struct ed64mmc_host *host, u8 *buf, int len)
 int starttime;
 
 	/* 4lines-1bit data read */
-	ed64_spicfg(host, ED64_SPICFG_1BIT | ED64_SPICFG_DAT | ED64_SPICFG_RD);
+	ed64_spicfg(host, ED64_SPICFG_1BIT | ED64_SPICFG_DAT | ED64_SPICFG_RD, 0);
 
 	/* seek for start bit */
 	for (i = TRANSFER_TIMEOUT; i; i--) {
@@ -194,7 +206,7 @@ int starttime;
 starttime=TRANSFER_TIMEOUT-i;
 
 	/* 4lines-2bit data read */
-	ed64_spicfg(host, ED64_SPICFG_DAT | ED64_SPICFG_RD);
+	ed64_spicfg(host, ED64_SPICFG_DAT | ED64_SPICFG_RD, 0);
 
 	/* read data */
 	{
@@ -263,7 +275,7 @@ static int ed64mmc_block_write(struct ed64mmc_host *host, const u8 *buf, int len
 	int i, j, d, resp;
 
 	/* 8bit data write */
-	ed64_spicfg(host, ED64_SPICFG_DAT);
+	ed64_spicfg(host, ED64_SPICFG_DAT, 0);
 
 	/* stable then put start bit on 4 DATs */
 	ed64_spiwrite(pi, 0xFF);
@@ -292,12 +304,12 @@ static int ed64mmc_block_write(struct ed64mmc_host *host, const u8 *buf, int len
 
 	/* send stop bit(s) */
 	/* 4lines-1bit data write */
-	ed64_spicfg(host, ED64_SPICFG_1BIT | ED64_SPICFG_DAT);
+	ed64_spicfg(host, ED64_SPICFG_1BIT | ED64_SPICFG_DAT, 0);
 	ed64_spiwrite(pi, 0xFF);
 
 	/* wait for write completion at card */
 	/* 4lines-1bit data read */
-	ed64_spicfg(host, ED64_SPICFG_1BIT | ED64_SPICFG_DAT | ED64_SPICFG_RD);
+	ed64_spicfg(host, ED64_SPICFG_1BIT | ED64_SPICFG_DAT | ED64_SPICFG_RD, 0);
 
 	/* seek for DAT0 response start bit...?? TODO where is this spec? I could find only SPI control token... but this is SD mode. */
 	for (i = TRANSFER_TIMEOUT; i; i--) {
@@ -330,7 +342,7 @@ static int ed64mmc_block_write(struct ed64mmc_host *host, const u8 *buf, int len
 
 	/* wait for end of busy...?? */
 	/* 8bit data read */
-	ed64_spicfg(host, ED64_SPICFG_DAT | ED64_SPICFG_RD);
+	ed64_spicfg(host, ED64_SPICFG_DAT | ED64_SPICFG_RD, 0);
 	ed64_spiwrite(pi, 0xFF); /* write something to clock...?? */
 	for (i = TRANSFER_TIMEOUT * 2; i; i--) { /* TODO twice is just ED64 does... have some mean? */
 		if ((ed64_spiread(pi, 0xFF/* previously received as 0x?F */) & 0xFF) == 0xFF) {
@@ -375,8 +387,171 @@ static void ed64mmc_request(struct mmc_host *mmc, struct mmc_request *mrq)
 
 	n64pi_ed64_enable(pi);
 
+	/* FIXME DEBUG delete me! */
+	if (cmd->opcode == 51) {
+#if 0
+void wr(struct n64pi *pi, int reg, int val) {
+	(void)*(volatile int*)0xA8040000;
+	*(volatile int*)(0xA8040000 + reg) = val;
+}
+int rd(struct n64pi *pi, int reg) {
+	(void)*(volatile int*)0xA8040000;
+	return *(volatile int*)(0xA8040000 + reg);
+}
+#else
+void wr(struct n64pi *pi, int reg, int val) {
+	ed64_regwrite(pi, val, reg);
+}
+int rd(struct n64pi *pi, int reg) {
+	return ed64_regread(pi, reg);
+}
+#endif
+
+#if 1
+void waitsd(struct n64pi *pi) {
+	while(rd(pi, 0x04) & 1) /*nothing*/ ; /* DMABUSY */
+}
+void sdwr(struct n64pi *pi, int val) {
+	wr(pi, 0x18, val);
+	waitsd(pi);
+}
+int sdrd(struct n64pi *pi, int val) {
+	sdwr(pi, val);
+	return rd(pi, 0x18);
+}
+#else
+void waitsd(struct n64pi *pi) {
+	ed64_spiwait(pi);
+}
+void sdwr(struct n64pi *pi, int val) {
+	ed64_spiwrite(pi, val);
+}
+int sdrd(struct n64pi *pi, int val) {
+	return ed64_spiread(pi, val);
+}
+#endif
+void sdmode(struct n64pi *pi, int mode) {
+	wr(pi, 0x1C, mode);
+	//(void)*(int*)0xB0000000; /* this will not be required? */
+}
+
+int crc7(int crc, int byte) {
+	int i;
+	crc ^= byte;
+	for(i = 0; i < 8; i++) {
+		crc <<= 1;
+		if(crc & 0x100) {
+			crc ^= 0x112;
+		}
+	}
+	return crc;
+}
+
+void sendcmd(struct n64pi *pi, int op, int arg, int spd) {
+	int i;
+	int crc;
+
+	sdmode(pi, 0x00 | spd);
+	sdwr(pi, 0xFF); /* dummy clock for stablize */
+	crc = 0;
+	sdwr(pi, op);
+	crc = crc7(crc, op);
+	for(i = 24; i >= 0; i -= 8) {
+		int b = (arg >> i) & 0xFF;
+		sdwr(pi, b);
+		crc = crc7(crc, b);
+	}
+	sdwr(pi, crc | 1);
+}
+
+char *align(char *dst) {
+	while(((int)dst & 15) != 0) {
+		*dst++ = 0xFF;
+	}
+	return dst;
+}
+
+char *recvcmd(struct n64pi *pi, char *dst, int respnbytes, int spd) {
+	int b = 0xFF;
+	int i;
+
+	sdmode(pi, 0x28 | spd);
+	for(i = 240; i > 0; i--) {
+		b = sdrd(pi, b);
+		if((b & 0xC0) == 0) {
+			break;
+		}
+	}
+	dst[-8] = i;
+	if(i == 0) {
+		*dst++ = 0xFF; /* make ff-filled at last */
+	} else {
+		int i;
+		*dst++ = b;
+
+		sdmode(pi, 0x08 | spd);
+		for(i = 0; i < respnbytes; i++) {
+			*dst++ = sdrd(pi, 0xFF);
+		}
+	}
+
+	dst = align(dst);
+
+	return dst;
+}
+
+char *cmd(struct n64pi *pi, char *dst, int op, int arg, int respnbytes, int spd) {
+	/* debug */
+	{
+		*(int*)dst = op;
+		dst += 4;
+		*(int*)dst = arg;
+		dst += 4;
+	}
+
+//{volatile int x;int i;for(i = 0; i < 1000000; i++)x++;}
+	sendcmd(pi, op, arg, spd);
+	return recvcmd(pi, dst, respnbytes, spd);
+}
+
+char *recvdat(struct n64pi *pi, char *dst, int nbytes, int spd) {
+	int i;
+
+	sdmode(pi, 0x38 | spd);
+	for(i = 240; i > 0; i--) {
+		int b = sdrd(pi, 0xFF);
+		if((b & 0x01) == 0) {
+			break;
+		}
+	}
+	dst[-15] = i;
+	if(i == 0) {
+		*dst++ = 0xFF; /* make ff-filled at last */
+	} else {
+		int i;
+		sdmode(pi, 0x18 | spd);
+		for(i = 0; i < nbytes; i++) {
+			*dst++ = sdrd(pi, 0xFF);
+		}
+	}
+
+	/* align */
+	dst = align(dst);
+
+	return dst;
+}
+		{
+			char buf[512];
+			char *dst = buf;
+			dst = cmd(pi, dst, 0x77, (/*mmc->card->rca*/0x9502 << 16), 6, 6);
+			dst = cmd(pi, dst, 0x73, 0, 6, 5); // speeding up cmd with DAT avoids underrun(?) (read scr)
+			dst = recvdat(pi, dst, 128, 6);
+			panic("bye: %p+%d", buf, dst - buf);
+		}
+	}
+
 	/* 8bit command write */
-	ed64_spicfg(host, 0);
+	ed64_spicfg(host, 0, !!data);
 
 	{
 		u8 opbyte = 0x40 | cmd->opcode;
@@ -406,7 +581,7 @@ static void ed64mmc_request(struct mmc_host *mmc, struct mmc_request *mrq)
 		int try;
 
 		/* 1bit command read */
-		ed64_spicfg(host, ED64_SPICFG_1BIT | ED64_SPICFG_RD);
+		ed64_spicfg(host, ED64_SPICFG_1BIT | ED64_SPICFG_RD, !!data);
 
 		/* seek for start-bit and transmission-bit */
 		for (try = CMD_TIMEOUT; try; try--) {
@@ -438,7 +613,7 @@ static void ed64mmc_request(struct mmc_host *mmc, struct mmc_request *mrq)
 			int i, j, crc = 0, ncrc = (cmd->flags & MMC_RSP_136) ? 0 : crc7_update(0, bits);
 
 			/* 8bit command read */
-			ed64_spicfg(host, ED64_SPICFG_RD);
+			ed64_spicfg(host, ED64_SPICFG_RD, !!data);
 
 			/* read response word(s) */
 			for (i = 0; i < rwords; i++) {
@@ -561,7 +736,7 @@ static void ed64mmc_set_ios(struct mmc_host *mmc, struct mmc_ios *ios)
 		struct n64pi *pi = host->pi;
 		n64pi_begin(pi);
 		n64pi_ed64_enable(pi);
-		ed64_spicfg(host, 0);
+		ed64_spicfg(host, 0, 0);
 		n64pi_ed64_disable(pi);
 		n64pi_end(pi);
 	}

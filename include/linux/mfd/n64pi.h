@@ -49,6 +49,18 @@ n64pi_write_dma(struct n64pi *pi, uint32_t cart_addr, void *ram_vaddr, uint32_t 
 extern uint32_t
 n64pi_read_word(struct n64pi *pi, uint32_t cart_addr);
 
+/* intended for timing-severe usecase (ex. ED64 sdmmc cmd->dat response reading) */
+extern void
+n64pi_write_word_unsafefast(struct n64pi *pi, uint32_t cart_addr, uint32_t value);
+
+/* TODO following unsafe-fast functions should be normal, and wait-reseterror should be in caller.
+ *      requires rewriting all mfd sub drivers... */
+
+/* intended for timing-severe usecase (ex. ED64 sdmmc cmd->dat response reading) */
+/* TODO how about addressing error? but I don't want to store value into memory... introduce "value_on_error"? */
+extern uint32_t
+n64pi_read_word_unsafefast(struct n64pi *pi, uint32_t cart_addr);
+
 /* will panic if not beginned */
 extern int
 n64pi_write_word(struct n64pi *pi, uint32_t cart_addr, uint32_t value);

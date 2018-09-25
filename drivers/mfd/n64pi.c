@@ -373,6 +373,56 @@ n64pi_write_word(struct n64pi *pi, uint32_t cart_addr, uint32_t value) {
 }
 EXPORT_SYMBOL_GPL(n64pi_write_word);
 
+/* TODO how about addressing error? but I don't want to store value into memory... introduce "value_on_error"? */
+uint32_t
+n64pi_read_word_unsafefast(struct n64pi *pi, uint32_t cart_addr) {
+	uint32_t value;
+
+	/* note: logging cause hard time failure! (sdmmc) */
+#if 0
+	ensure_beginned(pi);
+
+#ifdef DEBUG_REQLOG
+	n64pi_log_put(jiffies);
+	n64pi_log_put(11 << 28);
+	n64pi_log_put(cart_addr);
+#endif
+#endif
+
+	/* don't wait, don't reset the error, don't validate. that's unsafe but fast. */
+
+	value = __raw_readl(pi->membase + cart_addr - 0x05000000U); /* TODO hard coding membase offset!! */
+
+#if 0
+#ifdef DEBUG_REQLOG
+	n64pi_log_put(value);
+#endif
+#endif
+
+	return value;
+}
+EXPORT_SYMBOL_GPL(n64pi_read_word_unsafefast);
+
+void
+n64pi_write_word_unsafefast(struct n64pi *pi, uint32_t cart_addr, uint32_t value) {
+	/* note: logging cause hard time failure! (sdmmc) */
+#if 0
+	ensure_beginned(pi);
+
+#ifdef DEBUG_REQLOG
+	n64pi_log_put(jiffies);
+	n64pi_log_put(12 << 28);
+	n64pi_log_put(cart_addr);
+	n64pi_log_put(value);
+#endif
+#endif
+
+	/* don't wait, don't reset the error, don't validate. that's unsafe but fast. */
+
+	__raw_writel(value, pi->membase + cart_addr - 0x05000000U); /* TODO hard coding membase offset!! */
+}
+EXPORT_SYMBOL_GPL(n64pi_write_word_unsafefast);
+
 void
 n64pi_reset(struct n64pi *pi) {
 	ensure_beginned(pi);
