@@ -268,7 +268,7 @@ EXPORT_SYMBOL_GPL(n64pi_begin);
 
 int
 n64pi_trybegin(struct n64pi *pi) {
-	unsigned int flags; /* don't destroy pi->flags on cannot-get-lock. */
+	unsigned long flags; /* don't destroy pi->flags on cannot-get-lock. */
 
 	if (!spin_trylock_irqsave(&pi->lock, flags)) {
 		return N64PI_ERROR_BUSY;
