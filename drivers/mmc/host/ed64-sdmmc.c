@@ -169,7 +169,7 @@ static void crc16_2dat4_update(int (*crcs)[4], int byte) {
 	for (i = 0; i < 2; i++) {
 		for (d = 3; d >= 0; d--) {
 			int crc = (*crcs)[d];
-			crc ^= (byte >> 7) & 1;
+			crc ^= ((byte >> 7) & 1) << 15;
 			crc <<= 1;
 			if (crc & 0x10000) {
 				crc ^= 0x11021;
@@ -387,167 +387,18 @@ static void ed64mmc_request(struct mmc_host *mmc, struct mmc_request *mrq)
 
 	n64pi_ed64_enable(pi);
 
-	/* FIXME DEBUG delete me! */
-	if (cmd->opcode == 51) {
-#if 0
-void wr(struct n64pi *pi, int reg, int val) {
-	(void)*(volatile int*)0xA8040000;
-	*(volatile int*)(0xA8040000 + reg) = val;
-}
-int rd(struct n64pi *pi, int reg) {
-	(void)*(volatile int*)0xA8040000;
-	return *(volatile int*)(0xA8040000 + reg);
-}
-#else
-void wr(struct n64pi *pi, int reg, int val) {
-	ed64_regwrite(pi, val, reg);
-}
-int rd(struct n64pi *pi, int reg) {
-	return ed64_regread(pi, reg);
-}
-#endif
-
-#if 1
-void waitsd(struct n64pi *pi) {
-	while(rd(pi, 0x04) & 1) /*nothing*/ ; /* DMABUSY */
-}
-void sdwr(struct n64pi *pi, int val) {
-	wr(pi, 0x18, val);
-	waitsd(pi);
-}
-int sdrd(struct n64pi *pi, int val) {
-	sdwr(pi, val);
-	return rd(pi, 0x18);
-}
-#else
-void waitsd(struct n64pi *pi) {
-	ed64_spiwait(pi);
-}
-void sdwr(struct n64pi *pi, int val) {
-	ed64_spiwrite(pi, val);
-}
-int sdrd(struct n64pi *pi, int val) {
-	return ed64_spiread(pi, val);
-}
-#endif
-void sdmode(struct n64pi *pi, int mode) {
-	wr(pi, 0x1C, mode);
-	//(void)*(int*)0xB0000000; /* this will not be required? */
-}
-
-int crc7(int crc, int byte) {
-	int i;
-	crc ^= byte;
-	for(i = 0; i < 8; i++) {
-		crc <<= 1;
-		if(crc & 0x100) {
-			crc ^= 0x112;
-		}
+	/* some assertions before issueing cmd (to keep hard-time) */
+	if (data && cmd->opcode == 0) {
+		panic("ed64sdmmc: data with opcode==0??");
 	}
-	return crc;
-}
-
-void sendcmd(struct n64pi *pi, int op, int arg, int spd) {
-	int i;
-	int crc;
-
-	sdmode(pi, 0x00 | spd);
-	sdwr(pi, 0xFF); /* dummy clock for stablize */
-	crc = 0;
-	sdwr(pi, op);
-	crc = crc7(crc, op);
-	for(i = 24; i >= 0; i -= 8) {
-		int b = (arg >> i) & 0xFF;
-		sdwr(pi, b);
-		crc = crc7(crc, b);
+	if (data && !(cmd->flags & MMC_RSP_OPCODE)) {
+		panic("ed64sdmmc: data without opcode echo??");
 	}
-	sdwr(pi, crc | 1);
-}
-
-char *align(char *dst) {
-	while(((int)dst & 15) != 0) {
-		*dst++ = 0xFF;
+	if (data && (cmd->flags & MMC_RSP_136)) {
+		panic("ed64sdmmc: data with 136bit response??");
 	}
-	return dst;
-}
-
-char *recvcmd(struct n64pi *pi, char *dst, int respnbytes, int spd) {
-	int b = 0xFF;
-	int i;
-
-	sdmode(pi, 0x28 | spd);
-	for(i = 240; i > 0; i--) {
-		b = sdrd(pi, b);
-		if((b & 0xC0) == 0) {
-			break;
-		}
-	}
-	dst[-8] = i;
-	if(i == 0) {
-		*dst++ = 0xFF; /* make ff-filled at last */
-	} else {
-		int i;
-		*dst++ = b;
-
-		sdmode(pi, 0x08 | spd);
-		for(i = 0; i < respnbytes; i++) {
-			*dst++ = sdrd(pi, 0xFF);
-		}
-	}
-
-	dst = align(dst);
-
-	return dst;
-}
-
-char *cmd(struct n64pi *pi, char *dst, int op, int arg, int respnbytes, int spd) {
-	/* debug */
-	{
-		*(int*)dst = op;
-		dst += 4;
-		*(int*)dst = arg;
-		dst += 4;
-	}
-
-//{volatile int x;int i;for(i = 0; i < 1000000; i++)x++;}
-	sendcmd(pi, op, arg, spd);
-	return recvcmd(pi, dst, respnbytes, spd);
-}
-
-char *recvdat(struct n64pi *pi, char *dst, int nbytes, int spd) {
-	int i;
-
-	sdmode(pi, 0x38 | spd);
-	for(i = 240; i > 0; i--) {
-		int b = sdrd(pi, 0xFF);
-		if((b & 0x01) == 0) {
-			break;
-		}
-	}
-	dst[-15] = i;
-	if(i == 0) {
-		*dst++ = 0xFF; /* make ff-filled at last */
-	} else {
-		int i;
-		sdmode(pi, 0x18 | spd);
-		for(i = 0; i < nbytes; i++) {
-			*dst++ = sdrd(pi, 0xFF);
-		}
-	}
-
-	/* align */
-	dst = align(dst);
-
-	return dst;
-}
-		{
-			char buf[512];
-			char *dst = buf;
-			dst = cmd(pi, dst, 0x77, (/*mmc->card->rca*/0x9502 << 16), 6, 6);
-			dst = cmd(pi, dst, 0x73, 0, 6, 5); // speeding up cmd with DAT avoids underrun(?) (read scr)
-			dst = recvdat(pi, dst, 128, 6);
-			panic("bye: %p+%d", buf, dst - buf);
-		}
+	if (data && !(cmd->flags & MMC_RSP_CRC)) {
+		panic("ed64sdmmc: data without response crc??");
 	}
 
 	/* 8bit command write */
@@ -574,14 +425,111 @@ char *recvdat(struct n64pi *pi, char *dst, int nbytes, int spd) {
 		ed64_spiwrite(pi, crc | 1);
 	}
 
-	/* read response buffer, or just clock when opcode==0 */
-	if ((cmd->flags & MMC_RSP_PRESENT) || (cmd->opcode == 0)) {
+	if (data) { /* read response buffer and transfer data (fast-path) for reading DAT (hard-time required) */
+		u32 bits = 0xFF; /* fill with all 1s is important */
+		int i;
+		int try;
+
+		/* read response */
+
+		/* 1bit command read */
+		ed64_spicfg(host, ED64_SPICFG_1BIT | ED64_SPICFG_RD, 1);
+
+		/* seek for start-bit and transmission-bit */
+		for (try = CMD_TIMEOUT; try; try--) {
+//			u32 obits = bits;
+			bits = ed64_spiread(pi, bits/* previously received */); /* data magically shifts in from lsb */
+			if ((bits & 0xC0) == 0) {
+				/* found start-bit and transmission-bit! */
+//				dev_dbg(dev, "start-bit found: %08X->%08X\n", obits, bits);
+				/* convert into byte (strip out ED64 status in high halfword) to comparable with cmd->opcode */
+				bits &= 0xFF;
+				break;
+			}
+		}
+
+		//dev_dbg(dev, "w/data first cmd response byte; try=%d\n", try);
+
+		if (try == 0) {
+			cmd->error = -ETIMEDOUT;
+		} else {
+			uint8_t cmdresp[5];
+
+			/* note: testing bits with cmd->opcode or check crc later for keep hard-time */
+
+			/* receive response and crc (but not verify now) */
+			/* TODO which is faster: read 5 bytes, or read into word and a crc byte? */
+
+			/* 8bit command read */
+			ed64_spicfg(host, ED64_SPICFG_RD, 1);
+
+			/* read response bytes (incl. crc) */
+			for (i = 0; i < 5; i++) {
+				cmdresp[i] = ed64_spiread(pi, 0xFF/* something to clock */) & 0xFF;
+			}
+
+			//dev_dbg(dev, " response0=%08X\n", cmd->resp[0]);
+
+			/* transfer data */
+			/*
+			dev_dbg(dev, "transfer: blksz %i blocks %i sg_len %i sg length %i\n",
+			        data->blksz, data->blocks, data->sg_len, data->sg->length);
+			*/
+
+			for (i = 0; i < data->blocks; i++) {
+				size_t len = data->blksz;
+				u8 *buf;
+				struct page *page;
+				int result;
+				page = sg_page(data->sg);
+
+				buf = kmap(page) + data->sg->offset + (len * i);
+				if (data->flags & MMC_DATA_READ) {
+					result = ed64mmc_block_read(host, buf, len);
+				} else {
+					result = ed64mmc_block_write(host, buf, len);
+				}
+				kunmap(page);
+				flush_dcache_page(page);
+				if (result) {
+					dev_err(dev, "ed64mmc_request: cmd %i block transfer failed\n", cmd->opcode);
+					cmd->error = result;
+					break;
+				} else {
+					dev_dbg(dev, "transfer ok: %x bytes\n", len);
+					data->bytes_xfered += len;
+				}
+			}
+
+			/* verify cmd now */
+
+			if (bits != cmd->opcode) {
+				dev_dbg(dev, "mis opcode echo: exp=%02X act=%02X\n", cmd->opcode, bits);
+				cmd->error = -EILSEQ;
+			}
+
+			{
+				int crc = crc7_update(0, bits);
+				for (i = 0; i < 4; i++) {
+					crc = crc7_update(crc, cmdresp[i]);
+				}
+				if (cmdresp[4] != (crc | 1)) {
+					/* crc error */
+					cmd->error = -EIO;
+					dev_dbg(dev, " found crc error: expect=%02X actual=%02X\n", crc | 1, cmdresp[4]);
+				}
+			}
+
+			/* writeback cmd response */
+			cmd->resp[0] = ((struct{int w;}__attribute__((packed))*)cmdresp)->w;
+		}
+	} else if ((cmd->flags & MMC_RSP_PRESENT) || (cmd->opcode == 0)) { /* read response buffer, or just clock when opcode==0 */
 		/* read response */
 		u32 bits = 0xFF; /* fill with all 1s is important */
 		int try;
 
 		/* 1bit command read */
-		ed64_spicfg(host, ED64_SPICFG_1BIT | ED64_SPICFG_RD, !!data);
+		ed64_spicfg(host, ED64_SPICFG_1BIT | ED64_SPICFG_RD, 0);
 
 		/* seek for start-bit and transmission-bit */
 		for (try = CMD_TIMEOUT; try; try--) {
@@ -613,7 +561,7 @@ char *recvdat(struct n64pi *pi, char *dst, int nbytes, int spd) {
 			int i, j, crc = 0, ncrc = (cmd->flags & MMC_RSP_136) ? 0 : crc7_update(0, bits);
 
 			/* 8bit command read */
-			ed64_spicfg(host, ED64_SPICFG_RD, !!data);
+			ed64_spicfg(host, ED64_SPICFG_RD, 0);
 
 			/* read response word(s) */
 			for (i = 0; i < rwords; i++) {
@@ -654,39 +602,6 @@ char *recvdat(struct n64pi *pi, char *dst, int nbytes, int spd) {
 		}
 	} else {
 		dev_dbg(dev, "expect no response\n");
-	}
-
-	/* transfer data */
-	if (data && cmd->error == 0) {
-		int i;
-
-		dev_dbg(dev, "transfer: blksz %i blocks %i sg_len %i sg length %i\n",
-		        data->blksz, data->blocks, data->sg_len, data->sg->length);
-
-		for (i = 0; i < data->blocks; i++) {
-			size_t len = data->blksz;
-			u8 *buf;
-			struct page *page;
-			int result;
-			page = sg_page(data->sg);
-
-			buf = kmap(page) + data->sg->offset + (len * i);
-			if (data->flags & MMC_DATA_READ) {
-				result = ed64mmc_block_read(host, buf, len);
-			} else {
-				result = ed64mmc_block_write(host, buf, len);
-			}
-			kunmap(page);
-			flush_dcache_page(page);
-			if (result) {
-				dev_err(dev, "ed64mmc_request: cmd %i block transfer failed\n", cmd->opcode);
-				cmd->error = result;
-				break;
-			} else {
-				dev_dbg(dev, "transfer ok: %x bytes\n", len);
-				data->bytes_xfered += len;
-			}
-		}
 	}
 
 	n64pi_ed64_disable(pi);
