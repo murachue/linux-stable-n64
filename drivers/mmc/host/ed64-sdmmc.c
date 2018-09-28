@@ -83,69 +83,28 @@ struct ed64mmc_host {
 	uint32_t rombase; // ROM area that is used for ED64 DMA read/write (2048 bytes align required by ED64 DMA!)
 	uint32_t spicfg; // holds last ED64_REG_SPICFG value (for modify-write)
 	uint32_t datwidth; // holds DAT width, 0=1bit or 1=4bit.
+	uint32_t lastopcode; // holds last opcode (mainly for testing CMD55(prefix of ACMD))
 };
 
-/* TODO merge with n64cart? */
-// FIXME bad n64pi_read_word interface... no error can be returned.
-static void ed64_dummyread(struct n64pi *pi) {
-	(void)n64pi_read_word_unsafefast(pi, 0x08040000 + 0x00);
-}
-
-static uint32_t ed64_regread(struct n64pi *pi, unsigned int regoff) {
-	// FIXME bad n64pi_read_word interface... no error can be returned.
-	ed64_dummyread(pi); // dummy read required!!
-
-	// FIXME bad n64pi_read_word interface... no error can be returned.
-	return n64pi_read_word_unsafefast(pi, 0x08040000 + regoff);
-}
-
-static int ed64_regwrite(struct n64pi *pi, uint32_t value, unsigned int regoff) {
-	//int ret;
-
-	// FIXME bad n64pi_read_word interface... no error can be returned.
-	ed64_dummyread(pi); // dummy read required!!
-
-	// unsafefast never errors...
-	/*
-	if ((ret = n64pi_write_word_unsafefast(pi, 0x08040000 + regoff, value)) != N64PI_ERROR_SUCCESS) {
-		pr_err("%s: ed64_regwrite failed for %08x=%08x (%d)\n", __func__, regoff, value, ret);
-		return ret;
-	}
-	*/
-	n64pi_write_word_unsafefast(pi, 0x08040000 + regoff, value);
-
-	return N64PI_ERROR_SUCCESS;
-}
-
-// FIXME bad n64pi_read_word interface... no error can be returned.
 static void ed64_spiwait(struct n64pi *pi) {
-	while (ed64_regread(pi, ED64_REG_STATUS) & ED64_STATUS_DMABUSY) /*nothing*/ ; /* note: Yes, check DMABUSY bit. */
+	while (n64pi_ed64_regread_unsafefast(pi, ED64_REG_STATUS) & ED64_STATUS_DMABUSY) /*nothing*/ ; /* note: Yes, check DMABUSY bit. */
 }
 
-static int ed64_spiwrite(struct n64pi *pi, uint32_t value) {
-	int ret;
+static void ed64_spiwrite(struct n64pi *pi, uint32_t value) {
+	n64pi_ed64_regwrite_unsafefast(pi, value, ED64_REG_SPI);
 
-	if ((ret = ed64_regwrite(pi, value, ED64_REG_SPI)) != 0) {
-		return ret;
-	}
-
-	ed64_spiwait(pi); /* wait previous read/write */
-
-	return 0;
+	ed64_spiwait(pi); /* wait above write */
 }
+/* note: ED64_SPICFG_RD must be set in spicfg */
 static uint32_t ed64_spiread(struct n64pi *pi, uint32_t value) {
-	// FIXME bad n64pi_read_word interface... no error can be returned.
-	if (ed64_spiwrite(pi, value) != 0) {
-		return 0xFFFFffff;
-	}
+	ed64_spiwrite(pi, value);
 
-	return ed64_regread(pi, ED64_REG_SPI);
+	return n64pi_ed64_regread_unsafefast(pi, ED64_REG_SPI);
 }
 
-static int ed64_spicfg(struct ed64mmc_host *host, uint32_t cfg, int cmdwithdat) {
+static void ed64_spicfg(struct ed64mmc_host *host, uint32_t cfg, int cmdwithdat) {
 	struct n64pi *pi = host->pi;
 	int spicfg = cfg | host->spicfg;
-	int ret;
 
 	/* ED64 cannot latch both CMD and DAT*. To avoid losing beginning of DAT*, its preceding CMD must be sent with faster clock. */
 	/* TODO I think this highly depends on SD card... */
@@ -154,11 +113,7 @@ static int ed64_spicfg(struct ed64mmc_host *host, uint32_t cfg, int cmdwithdat) 
 		spicfg |= ED64_SPICFG_SPEED_25;
 	}
 
-	if ((ret = ed64_regwrite(pi, spicfg, ED64_REG_SPICFG)) != 0) {
-		return ret;
-	}
-
-	return 0;
+	n64pi_ed64_regwrite_unsafefast(pi, spicfg, ED64_REG_SPICFG);
 }
 
 /* TODO use linux/crc-ccitt.h:crc_ccitt_byte/crc_ccitt but it is little-endian crc, and for single line... */
@@ -254,12 +209,13 @@ starttime=TRANSFER_TIMEOUT-i;
 			continue;
 		}
 
+		/* pr_debug */
 		if (onebit) {
-			panic("ed64mmcbr: crc1 mismatch e=%04x a=%04x @%p st=%d\n", crcs[0], readcrcs[0], buf, starttime);
+			panic("ed64mmcbr: crc1 mismatch e=%04x a=%04x @%p st=%d\n", readcrcs[0], crcs[0], buf, starttime);
 		} else {
-			pr_debug("ed64mmcbr: crc4 mismatch e=%04x.%04x.%04x.%04x a=%04x.%04x.%04x.%04x\n",
-							 crcs[0], crcs[1], crcs[2], crcs[3],
-							 readcrcs[0], readcrcs[1], readcrcs[2], readcrcs[3]
+			panic("ed64mmcbr: crc4 mismatch e=%04x.%04x.%04x.%04x a=%04x.%04x.%04x.%04x\n",
+							 readcrcs[0], readcrcs[1], readcrcs[2], readcrcs[3],
+							 crcs[0], crcs[1], crcs[2], crcs[3]
 							);
 		}
 		return -EIO;
@@ -457,15 +413,24 @@ static void ed64mmc_request(struct mmc_host *mmc, struct mmc_request *mrq)
 
 			/* note: testing bits with cmd->opcode or check crc later for keep hard-time */
 
-			/* receive response and crc (but not verify now) */
-			/* TODO which is faster: read 5 bytes, or read into word and a crc byte? */
+			if (cmd->opcode == 13 && host->lastopcode == 55) {
+				/* ACMD13: ED64 is too slow to receive DAT after ACMD13 response "0d000009205b" completes: QUICK DIRTY HACK: EMULATION!! */
+				cmdresp[0] = 0x00;
+				cmdresp[1] = 0x00;
+				cmdresp[2] = 0x09;
+				cmdresp[3] = 0x20;
+				cmdresp[4] = 0x5B;
+			} else {
+				/* receive response and crc (but not verify now) */
+				/* TODO which is faster: read 5 bytes, or read into word and a crc byte? */
 
-			/* 8bit command read */
-			ed64_spicfg(host, ED64_SPICFG_RD, 1);
+				/* 8bit command read */
+				ed64_spicfg(host, ED64_SPICFG_RD, 1);
 
-			/* read response bytes (incl. crc) */
-			for (i = 0; i < 5; i++) {
-				cmdresp[i] = ed64_spiread(pi, 0xFF/* something to clock */) & 0xFF;
+				/* read response bytes (incl. crc) */
+				for (i = 0; i < 5; i++) {
+					cmdresp[i] = ed64_spiread(pi, 0xFF/* something to clock */) & 0xFF;
+				}
 			}
 
 			//dev_dbg(dev, " response0=%08X\n", cmd->resp[0]);
@@ -603,6 +568,8 @@ static void ed64mmc_request(struct mmc_host *mmc, struct mmc_request *mrq)
 	} else {
 		dev_dbg(dev, "expect no response\n");
 	}
+
+	host->lastopcode = cmd->opcode;
 
 	n64pi_ed64_disable(pi);
 
