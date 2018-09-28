@@ -49,15 +49,14 @@ n64pi_write_dma(struct n64pi *pi, uint32_t cart_addr, void *ram_vaddr, uint32_t 
 extern uint32_t
 n64pi_read_word(struct n64pi *pi, uint32_t cart_addr);
 
+/* TODO following unsafe-fast functions should be partially normal... wait-reseterror should be in caller.
+ *      requires rewriting all mfd sub drivers... */
+
 /* intended for timing-severe usecase (ex. ED64 sdmmc cmd->dat response reading) */
 extern void
 n64pi_write_word_unsafefast(struct n64pi *pi, uint32_t cart_addr, uint32_t value);
 
-/* TODO following unsafe-fast functions should be normal, and wait-reseterror should be in caller.
- *      requires rewriting all mfd sub drivers... */
-
 /* intended for timing-severe usecase (ex. ED64 sdmmc cmd->dat response reading) */
-/* TODO how about addressing error? but I don't want to store value into memory... introduce "value_on_error"? */
 extern uint32_t
 n64pi_read_word_unsafefast(struct n64pi *pi, uint32_t cart_addr);
 
@@ -72,6 +71,22 @@ n64pi_reset(struct n64pi *pi);
 /* will panic if not beginned */
 extern uint32_t
 n64pi_get_status(struct n64pi *pi);
+
+/* will panic if not beginned, or if not ed64_enable'd */
+extern unsigned int
+n64pi_ed64_regread(struct n64pi *pi, unsigned int regoff);
+
+/* will panic if not beginned, or if not ed64_enable'd */
+extern void
+n64pi_ed64_regwrite(struct n64pi *pi, unsigned int value, unsigned int regoff);
+
+/* intended for timing-severe usecase (ex. ED64 sdmmc cmd->dat response reading) */
+extern unsigned int
+n64pi_ed64_regread_unsafefast(struct n64pi *pi, unsigned int regoff);
+
+/* intended for timing-severe usecase (ex. ED64 sdmmc cmd->dat response reading) */
+extern void
+n64pi_ed64_regwrite_unsafefast(struct n64pi *pi, unsigned int value, unsigned int regoff);
 
 /* will panic if not beginned */
 extern int

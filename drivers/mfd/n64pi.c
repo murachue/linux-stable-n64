@@ -54,36 +54,6 @@ n64pi_log_put(unsigned v) {
 }
 #endif
 
-static void
-ed64_dummyread(void __iomem *membase) {
-	__raw_readl(membase + 0x00);
-}
-
-/*
-static unsigned int
-ed64_regread(void __iomem *membase, unsigned int regoff)
-{
-	ed64_dummyread(membase); // dummy read required!!
-	return __raw_readl(membase + regoff);
-}
-*/
-
-static void
-ed64_regwrite(void __iomem *membase, unsigned int value, unsigned int regoff) {
-	ed64_dummyread(membase); // dummy read required!!
-	__raw_writel(value, membase + regoff);
-}
-
-static void
-ed64_enable(void __iomem *membase) {
-	ed64_regwrite(membase, 0x1234, 0x20);
-}
-
-static void
-ed64_disable(void __iomem *membase) {
-	ed64_regwrite(membase, 0, 0x20);
-}
-
 static int
 is_busy(struct n64pi *pi) {
 	return __raw_readl(pi->regbase + REG_STATUS) & 3;
@@ -292,6 +262,8 @@ void
 n64pi_end(struct n64pi *pi) {
 	ensure_beginned(pi);
 
+	/* TODO check pi->ed64_enabled == 0 */
+
 	pi->ongoing = 0;
 
 	spin_unlock_irqrestore(&pi->lock, pi->flags);
@@ -460,6 +432,50 @@ n64pi_get_status(struct n64pi *pi) {
 }
 EXPORT_SYMBOL_GPL(n64pi_get_status);
 
+unsigned int
+n64pi_ed64_regread_unsafefast(struct n64pi *pi, unsigned int regoff) {
+	void __iomem *membase = pi->membase - 0x05000000U + 0x08040000; /* TODO hard coding membase offset!! */
+	__raw_readl(membase + 0x00); // dummy read required??
+	return __raw_readl(membase + regoff);
+}
+
+void
+n64pi_ed64_regwrite_unsafefast(struct n64pi *pi, unsigned int value, unsigned int regoff) {
+	void __iomem *membase = pi->membase - 0x05000000U + 0x08040000; /* TODO hard coding membase offset!! */
+	__raw_readl(membase + 0x00); // dummy read required?? (only if previous is write, to wait piwrite?)
+	__raw_writel(value, membase + regoff);
+}
+
+static void n64pi_ed64_verify(struct n64pi *pi, unsigned int regoff) {
+	ensure_beginned(pi);
+
+	if (pi->ed64_enabled == 0) {
+		panic("n64pi sub driver program error: ed64 r/w but not enabled");
+	}
+
+	if ((regoff & 4) != 0) {
+		panic("n64pi sub driver program error: unaligned ed64 regoff");
+	}
+
+	if (0x54 < regoff) {
+		panic("n64pi sub driver program error: ed64 regoff out of range");
+	}
+}
+
+unsigned int
+n64pi_ed64_regread(struct n64pi *pi, unsigned int regoff) {
+	n64pi_ed64_verify(pi, regoff);
+
+	return n64pi_ed64_regread_unsafefast(pi, regoff);
+}
+
+void
+n64pi_ed64_regwrite(struct n64pi *pi, unsigned int value, unsigned int regoff) {
+	n64pi_ed64_verify(pi, regoff);
+
+	n64pi_ed64_regwrite_unsafefast(pi, value, regoff);
+}
+
 int
 n64pi_ed64_enable(struct n64pi *pi) {
 	ensure_beginned(pi);
@@ -471,12 +487,12 @@ n64pi_ed64_enable(struct n64pi *pi) {
 	n64pi_log_put(pi->ed64_enabled);
 #endif
 
-	if (pi->ed64_enabled == 0) {
-		ed64_enable(pi->membase - 0x05000000U + 0x08040000); /* TODO hard coding membase offset!! */
-		block_until_pi_completion(pi); // ED64 regs seems slow, wait for completion.
-	}
 	// TODO INT_MAX check?
 	pi->ed64_enabled++;
+	if (pi->ed64_enabled == 1) {
+		n64pi_ed64_regwrite_unsafefast(pi, 0x1234, 0x20);
+		block_until_pi_completion(pi); // ED64 regs seems slow, wait for completion.
+	}
 
 	return N64PI_ERROR_SUCCESS;
 }
@@ -494,7 +510,7 @@ n64pi_ed64_disable(struct n64pi *pi) {
 #endif
 
 	if (pi->ed64_enabled == 1) {
-		ed64_disable(pi->membase - 0x05000000U + 0x08040000); /* TODO hard coding membase offset!! */
+		n64pi_ed64_regwrite_unsafefast(pi, 0, 0x20);
 		block_until_pi_completion(pi); // ED64 regs seems slow, wait for completion.
 	}
 	pi->ed64_enabled--;
