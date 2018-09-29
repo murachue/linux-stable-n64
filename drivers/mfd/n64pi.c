@@ -453,7 +453,7 @@ static void n64pi_ed64_verify(struct n64pi *pi, unsigned int regoff) {
 		panic("n64pi sub driver program error: ed64 r/w but not enabled");
 	}
 
-	if ((regoff & 4) != 0) {
+	if ((regoff & 3) != 0) {
 		panic("n64pi sub driver program error: unaligned ed64 regoff");
 	}
 
