@@ -68,34 +68,6 @@ static struct uart_driver ed64_uart = {
 
 static struct timer_list ed64_timer;
 
-/* TODO merge with n64cart? */
-// FIXME bad n64pi_read_word interface... no error can be returned.
-static void ed64_dummyread(struct n64pi *pi) {
-	(void)n64pi_read_word(pi, 0x08040000 + 0x00);
-}
-
-static uint32_t ed64_regread(struct n64pi *pi, unsigned int regoff) {
-	// FIXME bad n64pi_read_word interface... no error can be returned.
-	ed64_dummyread(pi); // dummy read required!!
-
-	// FIXME bad n64pi_read_word interface... no error can be returned.
-	return n64pi_read_word(pi, 0x08040000 + regoff);
-}
-
-static int ed64_regwrite(struct n64pi *pi, uint32_t value, unsigned int regoff) {
-	int ret;
-
-	// FIXME bad n64pi_read_word interface... no error can be returned.
-	ed64_dummyread(pi); // dummy read required!!
-
-	if ((ret = n64pi_write_word(pi, 0x08040000 + regoff, value)) != N64PI_ERROR_SUCCESS) {
-		pr_err("%s: ed64_regwrite failed for %08x=%08x (%d)\n", __func__, regoff, value, ret);
-		return ret;
-	}
-
-	return N64PI_ERROR_SUCCESS;
-}
-
 /**
  * ed64_tx_empty - Check if the transmitter fifo is empty.
  * @port: Ptr to the uart_port.
@@ -202,27 +174,27 @@ static int ed64_tx(struct uart_port *port, int emit_error)
 		goto err;
 	}
 
-	if ((ed64->status = ed64_regread(pi, 0x04)) & 1) {
+	if ((ed64->status = n64pi_ed64_regread(pi, 0x04)) & 1) {
 		/* ED64 DMA is running!? */
 		if (emit_error) {
 			pr_warn("%s: ED64 DMA is already running that is unexpected... waiting for that.\n", __func__);
 		}
-		while ((ed64->status = ed64_regread(pi, 0x04)) & 1) {
+		while ((ed64->status = n64pi_ed64_regread(pi, 0x04)) & 1) {
 			/* ED64 DMA is running */
 		}
 	}
 
 	/* cart -> USB */
-	if (ed64_regwrite(pi, 512/512 - 1, 0x08) != N64PI_ERROR_SUCCESS) { // dmalen in 512bytes - 1
+	if (n64pi_ed64_regwrite(pi, 512/512 - 1, 0x08) != N64PI_ERROR_SUCCESS) { // dmalen in 512bytes - 1
 		goto err;
 	}
-	if (ed64_regwrite(pi, ed64->rombase / 2048, 0x0c) != N64PI_ERROR_SUCCESS) { // dmaaddr in 2048bytes
+	if (n64pi_ed64_regwrite(pi, ed64->rombase / 2048, 0x0c) != N64PI_ERROR_SUCCESS) { // dmaaddr in 2048bytes
 		goto err;
 	}
-	if (ed64_regwrite(pi, 4, 0x14) != N64PI_ERROR_SUCCESS) { // dmacfg = 4(ram2fifo)
+	if (n64pi_ed64_regwrite(pi, 4, 0x14) != N64PI_ERROR_SUCCESS) { // dmacfg = 4(ram2fifo)
 		goto err;
 	}
-	while ((ed64->status = ed64_regread(pi, 0x04)) & 1) {
+	while ((ed64->status = n64pi_ed64_regread(pi, 0x04)) & 1) {
 		/* ED64 DMA is running */
 	}
 
@@ -336,7 +308,7 @@ static void ed64_read(struct uart_port *port)
 		goto err;
 	}
 
-	ed64->status = ed64_regread(pi, 0x04);
+	ed64->status = n64pi_ed64_regread(pi, 0x04);
 	if (ed64->status & 1) {
 		// ED64 DMA is still running(!?)... poll read later (at timer handler).
 		// this is unexpected status, but recoverable.
@@ -344,17 +316,17 @@ static void ed64_read(struct uart_port *port)
 		goto err;
 	}
 
-	if (ed64_regwrite(pi, 512/512 - 1, 0x08) != N64PI_ERROR_SUCCESS) { // dmalen in 512bytes - 1
+	if (n64pi_ed64_regwrite(pi, 512/512 - 1, 0x08) != N64PI_ERROR_SUCCESS) { // dmalen in 512bytes - 1
 		goto err;
 	}
-	if (ed64_regwrite(pi, ed64->rombase / 2048, 0x0c) != N64PI_ERROR_SUCCESS) { // dmaaddr in 2048bytes
+	if (n64pi_ed64_regwrite(pi, ed64->rombase / 2048, 0x0c) != N64PI_ERROR_SUCCESS) { // dmaaddr in 2048bytes
 		goto err;
 	}
-	if (ed64_regwrite(pi, 3, 0x14) != N64PI_ERROR_SUCCESS) { // dmacfg = 3(fifo2ram)
+	if (n64pi_ed64_regwrite(pi, 3, 0x14) != N64PI_ERROR_SUCCESS) { // dmacfg = 3(fifo2ram)
 		goto err;
 	}
 
-	while ((ed64->status = ed64_regread(pi, 0x04)) & 1) {
+	while ((ed64->status = n64pi_ed64_regread(pi, 0x04)) & 1) {
 		/* ED64 DMA is running */
 	}
 
@@ -567,7 +539,7 @@ static void ed64_status(struct uart_port *port)
 		goto err;
 	}
 
-	ed64->status = ed64_regread(pi, 0x04);
+	ed64->status = n64pi_ed64_regread(pi, 0x04);
 
 	n64pi_end(pi);
 
