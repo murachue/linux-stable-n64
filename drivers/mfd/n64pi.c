@@ -27,6 +27,8 @@
 
 //#define DEBUG_REQLOG
 
+//#define ED64_KRIKZZSTYLE
+
 #define REG_DRAMADDR 0x00
 #define REG_CARTADDR 0x04
 #define REG_DRAM2CART 0x08
@@ -435,15 +437,23 @@ EXPORT_SYMBOL_GPL(n64pi_get_status);
 unsigned int
 n64pi_ed64_regread_unsafefast(struct n64pi *pi, unsigned int regoff) {
 	void __iomem *membase = pi->membase - 0x05000000U + 0x08040000; /* TODO hard coding membase offset!! */
+#ifdef ED64_KRIKZZSTYLE
 	__raw_readl(membase + 0x00); // dummy read required??
+#endif
 	return __raw_readl(membase + regoff);
 }
 
 void
 n64pi_ed64_regwrite_unsafefast(struct n64pi *pi, unsigned int value, unsigned int regoff) {
 	void __iomem *membase = pi->membase - 0x05000000U + 0x08040000; /* TODO hard coding membase offset!! */
+#ifdef ED64_KRIKZZSTYLE
 	__raw_readl(membase + 0x00); // dummy read required?? (only if previous is write, to wait piwrite?)
 	__raw_writel(value, membase + regoff);
+	/* XXX next pi r/w must be wait iobusy!! */
+#else
+	__raw_writel(value, membase + regoff);
+	while(__raw_readl(pi->regbase + REG_STATUS) & 3) /*nothing*/ ;
+#endif
 }
 
 static void n64pi_ed64_verify(struct n64pi *pi, unsigned int regoff) {
