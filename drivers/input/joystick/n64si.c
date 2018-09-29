@@ -130,9 +130,12 @@ out: /* moving out label to after mod_timer... avoid continuous error. TODO move
 static irqreturn_t n64si_interrupt(int irq, void *_si)
 {
 	struct n64si *si = _si;
+	/* many messages... acking just after SI DMA is not enough...? don't spit message. */
+	/*
 	uint32_t status = __raw_readl(si->regbase + REG_STATUS);
 
 	dev_err(si->dev, "spurious interrupt (status=%08X)\n", status);
+	*/
 	__raw_writel(0, si->regbase + REG_STATUS); /* ack */
 
 	return IRQ_HANDLED;
