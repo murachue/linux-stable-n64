@@ -43,7 +43,6 @@ struct n64si { /* represents the driver status of the SI device */
 	int use_count; /* holds how many controllers are opened (0 to 4, for start/stop polling) */
 	int ongoing; /* holds boolean means n64si is DMAing or not */
 	struct input_dev *inputdev[4]; /* literally */
-	uint32_t prevvalues[4]; /* holds previous button/stick values to calculate diff and report if changed */
 	struct timer_list polltimer; /* literally too. */
 };
 
@@ -131,8 +130,9 @@ out: /* moving out label to after mod_timer... avoid continuous error. TODO move
 static irqreturn_t n64si_interrupt(int irq, void *_si)
 {
 	struct n64si *si = _si;
+	uint32_t status = __raw_readl(si->regbase + REG_STATUS);
 
-	dev_err(si->dev, "spurious interrupt\n");
+	dev_err(si->dev, "spurious interrupt (status=%08X)\n", status);
 	__raw_writel(0, si->regbase + REG_STATUS); /* ack */
 
 	return IRQ_HANDLED;
@@ -233,7 +233,6 @@ static int __init n64si_probe(struct platform_device *pdev)
 			}
 
 			si->inputdev[i] = idev;
-			si->prevvalues[i] = 0; /* TODO set -1 to report on first? */
 			idev->dev.parent = &pdev->dev;
 			input_set_drvdata(idev, si);
 
@@ -256,7 +255,7 @@ static int __init n64si_probe(struct platform_device *pdev)
 				__set_bit(buttons_from_msb[j], idev->keybit);
 			}
 			for (j = 0; j < 2; j++) {
-				input_set_abs_params(idev, ABS_X + j, -127, 127, 0, 10); /* NOTE: ABS_X and ABS_Y are continuous value */
+				input_set_abs_params(idev, ABS_X + j, -127, 127, 0, 12); /* NOTE: ABS_X and ABS_Y are continuous value */
 			}
 
 			err = input_register_device(idev);
