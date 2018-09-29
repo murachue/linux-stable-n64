@@ -330,4 +330,14 @@ config JOYSTICK_MAPLE
 	  To compile this as a module choose M here: the module will be called
 	  maplecontrol.
 
+config JOYSTICK_N64SI
+	tristate "Nintendo 64 Controller Bros."
+	depends on NINTENDO64
+	help
+	  Say Y here if you have an Nintendo 64 Controller Bros. joystick
+		connected to it.
+
+	  To compile this driver as a module, choose M here: the
+	  module will be called n64si.
+
 endif
