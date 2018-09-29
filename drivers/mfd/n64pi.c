@@ -469,11 +469,13 @@ n64pi_ed64_regread(struct n64pi *pi, unsigned int regoff) {
 	return n64pi_ed64_regread_unsafefast(pi, regoff);
 }
 
-void
+int
 n64pi_ed64_regwrite(struct n64pi *pi, unsigned int value, unsigned int regoff) {
 	n64pi_ed64_verify(pi, regoff);
 
 	n64pi_ed64_regwrite_unsafefast(pi, value, regoff);
+
+	return 0; /* TODO return error if verify failed */
 }
 
 int

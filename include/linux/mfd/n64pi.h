@@ -77,7 +77,7 @@ extern unsigned int
 n64pi_ed64_regread(struct n64pi *pi, unsigned int regoff);
 
 /* will panic if not beginned, or if not ed64_enable'd */
-extern void
+extern int
 n64pi_ed64_regwrite(struct n64pi *pi, unsigned int value, unsigned int regoff);
 
 /* intended for timing-severe usecase (ex. ED64 sdmmc cmd->dat response reading) */
