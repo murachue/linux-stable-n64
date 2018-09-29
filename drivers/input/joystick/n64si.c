@@ -21,16 +21,17 @@
 #include <linux/errno.h>
 #include <linux/kernel.h>
 #include <linux/module.h>
-#include <linux/init.h>
 */
+#include <linux/init.h> /* __init __exit */
 #include <linux/interrupt.h>
 #include <linux/input.h>
 #include <linux/mutex.h>
 #include <linux/timer.h>
+#include <linux/dma-mapping.h>
 
 #define N64SI_POLL_DELAY (HZ * 20 / 1000) // 20ms
 
-#define REG_RAMADDR 0x00
+#define REG_DRAMADDR 0x00
 #define REG_SI2RAM 0x04
 #define REG_RAM2SI 0x10
 #define REG_STATUS 0x18
@@ -38,7 +39,7 @@
 struct n64si { /* represents the driver status of the SI device */
 	struct device *dev; /* is a corresponding platform device */
 	void __iomem *regbase; /* is a base virtual address of SI registers (ie. 0xA4800000) */
-	DECLARE_MUTEX(mutex); /* holds mutex for this state container */
+	struct mutex mutex; /* holds mutex for this state container */
 	int use_count; /* holds how many controllers are opened (0 to 4, for start/stop polling) */
 	int ongoing; /* holds boolean means n64si is DMAing or not */
 	struct input_dev *inputdev[4]; /* literally */
@@ -72,7 +73,7 @@ static void n64si_poll(unsigned long private)
 	/* send the commands */
 	busaddr = dma_map_single(si->dev, &buf, 64, DMA_TO_DEVICE);
 	if(dma_mapping_error(si->dev, busaddr)) {
-		dev_err(pi->dev, "%s: Can't map DMA buffer: %p+40; skipping.\n", "send", &buf);
+		dev_err(si->dev, "%s: Can't map DMA buffer: %p+40; skipping.\n", "send", &buf);
 		goto out;
 	}
 	__raw_writel(busaddr, si->regbase + REG_DRAMADDR);
@@ -83,7 +84,7 @@ static void n64si_poll(unsigned long private)
 	/* receive the results */
 	busaddr = dma_map_single(si->dev, &buf, 64, DMA_FROM_DEVICE);
 	if(dma_mapping_error(si->dev, busaddr)) {
-		dev_err(pi->dev, "%s: Can't map DMA buffer: %p+40; skipping.\n", "recv", &buf);
+		dev_err(si->dev, "%s: Can't map DMA buffer: %p+40; skipping.\n", "recv", &buf);
 		goto out;
 	}
 	__raw_writel(busaddr, si->regbase + REG_DRAMADDR);
@@ -124,11 +125,12 @@ static void n64si_poll(unsigned long private)
 	/* reschedule */
 	mod_timer(&si->polltimer, jiffies + N64SI_POLL_DELAY);
 out: /* moving out label to after mod_timer... avoid continuous error. TODO move above? */
+	;
 }
 
 static irqreturn_t n64si_interrupt(int irq, void *_si)
 {
-	struct n64si *si = (struct n64si *)private;
+	struct n64si *si = _si;
 
 	dev_err(si->dev, "spurious interrupt\n");
 	__raw_writel(0, si->regbase + REG_STATUS); /* ack */
@@ -151,8 +153,8 @@ static int n64si_open(struct input_dev *dev)
 
 	si->use_count++;
 
-out:
 	mutex_unlock(&si->mutex);
+
 	return err;
 }
 
@@ -214,7 +216,7 @@ static int __init n64si_probe(struct platform_device *pdev)
 	si->ongoing = 0;
 	init_timer(&si->polltimer);
 	si->polltimer.function = n64si_poll;
-	si->polltimer.data = si;
+	si->polltimer.data = (unsigned long)si;
 	/* note: start timer will be done when first open. */
 
 	/* register inputs */
@@ -224,7 +226,7 @@ static int __init n64si_probe(struct platform_device *pdev)
 
 		for (i = 0; i < 4; i++) {
 			struct input_dev *idev;
-			idev = devm_input_allocate_device();
+			idev = devm_input_allocate_device(&pdev->dev);
 			if (!idev) {
 				err = -ENOMEM;
 				break;
@@ -277,7 +279,7 @@ static int __init n64si_probe(struct platform_device *pdev)
 }
 
 /* TODO: __exit can be set? (non-hotpluggable, called only when this module is unloading) */
-static void /*__exit*/ n64si_remove(struct platform_device *pdev)
+static int /*__exit*/ n64si_remove(struct platform_device *pdev)
 {
 	struct n64si *si = platform_get_drvdata(pdev);
 	int i;
@@ -285,6 +287,8 @@ static void /*__exit*/ n64si_remove(struct platform_device *pdev)
 	for(i = 0; i < 4; i++) {
 		input_unregister_device(si->inputdev[i]);
 	}
+
+	return 0;
 }
 
 #ifdef CONFIG_OF
@@ -306,7 +310,7 @@ static struct platform_driver n64si_driver = {
 /* note: using module_p_d_probe because this n64si can be module and SI is not hot-pluggable
  * (instead of module_p_d(hotplug) or builtin_p_d*(non-modular).)
  */
-module_platform_driver_probe(n64si_driver);
+module_platform_driver_probe(n64si_driver, n64si_probe);
 
 MODULE_AUTHOR("Murachue <murachue+github@gmail.com>");
 MODULE_DESCRIPTION("Driver for Nintendo 64 Controller Bros.");
