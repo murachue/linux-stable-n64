@@ -48,6 +48,13 @@ struct n64si { /* represents the driver status of the SI device */
 
 static const char *n64si_phys[4] = { "n64si/input0", "n64si/input1", "n64si/input2", "n64si/input3" };
 
+static const int buttons_from_msb[16] = {
+	BTN_A, BTN_B, BTN_Z, BTN_START,
+	BTN_DPAD_UP, BTN_DPAD_DOWN, BTN_DPAD_LEFT, BTN_DPAD_RIGHT, /* DPads */
+	-1, -1, BTN_TL, BTN_TR,
+	BTN_FORWARD, BTN_BACK, BTN_LEFT, BTN_RIGHT, /* Cs: up, down, left, right. */
+};
+
 static void n64si_poll(unsigned long private)
 {
 	struct n64si *si = (struct n64si *)private;
@@ -88,21 +95,31 @@ static void n64si_poll(unsigned long private)
 	__raw_writel(0, si->regbase + REG_STATUS);
 
 	/* inspect and report! */
-	/*
-		 BTN_A, BTN_B,
-		 BTN_TL, BTN_TR, BTN_Z,
-		 BTN_START,
-		 BTN_DPAD_UP, BTN_DPAD_DOWN, BTN_DPAD_LEFT, BTN_DPAT_RIGHT,
-		 BTN_FORWARD, BTN_BACK, BTN_LEFT, BTN_RIGHT,
-		 */
+	{
+		int i, j;
 
-	input_report_key(amijoy_dev[i], BTN_TRIGGER, button);
+		for (i = 0; i < 4; i++) {
+			if (buf[i * 2] & 0x0000C000) { /* [15]not_present [14]bad_command */
+				continue;
+			}
 
-	input_report_abs(amijoy_dev[i], ABS_X, ((data >> 1) & 1) - ((data >> 9) & 1));
-	data = ~(data ^ (data << 1));
-	input_report_abs(amijoy_dev[i], ABS_Y, ((data >> 1) & 1) - ((data >> 9) & 1));
+			{
+				uint32_t stat = buf[i * 2 + 1];
+				struct input_dev *idev = si->inputdev[i];
+				uint32_t mask = 0x80000000;
 
-	input_sync(amijoy_dev[i]);
+				for(j = 0; j < 16; j++) {
+					input_report_key(idev, buttons_from_msb[j], !!(stat & mask));
+					mask >>= 1;
+				}
+
+				input_report_abs(idev, ABS_X, (int8_t)((stat >> 8) & 0xFF));
+				input_report_abs(idev, ABS_Y, (int8_t)((stat >> 0) & 0xFF));
+
+				input_sync(idev);
+			}
+		}
+	}
 
 	/* reschedule */
 	mod_timer(&si->polltimer, jiffies + N64SI_POLL_DELAY);
@@ -202,7 +219,7 @@ static int __init n64si_probe(struct platform_device *pdev)
 
 	/* register inputs */
 	{
-		int i;
+		int i, j;
 		int err;
 
 		for (i = 0; i < 4; i++) {
@@ -230,19 +247,11 @@ static int __init n64si_probe(struct platform_device *pdev)
 
 			idev->evbit[0] = BIT_MASK(EV_KEY) | BIT_MASK(EV_ABS); /* NOTE: EV_KEY and EV_ABS are same BIT_WORD(=0) */
 			idev->absbit[0] = BIT_MASK(ABS_X) | BIT_MASK(ABS_Y); /* NOTE: ABS_X and ABS_Y are same BIT_WORD(=0). They are automatically set by input_set_abs_params. */
-			{
-				const int buttons[] = {
-					BTN_A, BTN_B,
-					BTN_TL, BTN_TR, BTN_Z/* or TRIGGER? */,
-					BTN_START,
-					BTN_DPAD_UP, BTN_DPAD_DOWN, BTN_DPAD_LEFT, BTN_DPAT_RIGHT,/* DPads, not Cs. */
-					BTN_FORWARD, BTN_BACK, BTN_LEFT, BTN_RIGHT,/* Cs. up, down, left, right. */
-				};
-				int i;
-
-				for(i = 0; i < sizeof(buttons)/sizeof(*buttons); i++) {
-					__set_bit(buttons[u], idev->keybit);
+			for(j = 0; j < sizeof(buttons_from_msb)/sizeof(*buttons_from_msb); j++) {
+				if (buttons_from_msb[j] == -1) {
+					continue;
 				}
+				__set_bit(buttons_from_msb[j], idev->keybit);
 			}
 			for (j = 0; j < 2; j++) {
 				input_set_abs_params(idev, ABS_X + j, -127, 127, 0, 10); /* NOTE: ABS_X and ABS_Y are continuous value */
