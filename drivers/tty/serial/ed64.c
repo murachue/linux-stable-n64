@@ -233,7 +233,7 @@ static void ed64_write(struct uart_port *port)
 	*/
 
 	/* TODO don't return on xmitbuf[0] > 0 */
-	if(uart_circ_empty(xmit) || uart_tx_stopped(port)) {
+	if(uart_circ_empty(xmit) || (port->state->port.tty == NULL)||/*TODO FIXME why it becomes NULL??*/ uart_tx_stopped(port)) {
 		ed64_stop_tx(port);
 		return;
 	}
