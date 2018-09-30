@@ -209,13 +209,13 @@ static int ed64_tx(struct uart_port *port, int emit_error)
 
 	ed64->xmitbuf[0] = 0; /* clear buffer */
 
-	return 1;
+	return 0;
 
 err:
 	// must be ended even when error.
 	n64pi_end(pi);
 
-	return 0;
+	return 1;
 }
 
 /**
@@ -274,7 +274,7 @@ static void ed64_write(struct uart_port *port)
 			port->icount.tx += count;
 		}
 
-		if (!ed64_tx(port, 1)) {
+		if (ed64_tx(port, 1) != 0) {
 			return;
 		}
 	}
@@ -783,7 +783,7 @@ static void ed64_console_write(struct console *co, const char *buf, unsigned cou
 	unsigned len = (avail < count) ? avail : count; // min(avail, count)
 	ed64->xmitbuf[0] += len;
 	memcpy(ed64->xmitbuf + 1 + pos, buf, len);
-	if (!ed64_tx(&port, 0)) {
+	if (ed64_tx(&port, 0) != 0) {
 		// error... but putting message cause recursive write. do nothing.
 	}
 }
