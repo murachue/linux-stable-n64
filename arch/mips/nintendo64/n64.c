@@ -407,6 +407,30 @@ int __init n64_register_devices(void)
 arch_initcall(n64_register_devices);
 
 #ifdef CONFIG_EARLY_PRINTK
+#if 0
+// krikzz style
+static void ed64_regread(int regoff) {
+	__raw_readl((__iomem void *)KSEG1ADDR(0x08040000));
+	return __raw_readl((__iomem void *)KSEG1ADDR(0x08040000 + value));
+}
+static void ed64_regwrite(int regoff, uint32_t value) {
+	__raw_readl((__iomem void *)KSEG1ADDR(0x08040000));
+	__raw_writel(value, (__iomem void *)KSEG1ADDR(0x08040000 + value));
+}
+#else
+// it-should-be style
+static void pi_wait(void) {
+	while(__raw_readl((__iomem void *)KSEG1ADDR(0x04600010)) & 3) /*wait-while-pi-iobusy/dmabusy*/ ;
+}
+static u32 ed64_regread(int regoff) {
+	return __raw_readl((__iomem void *)KSEG1ADDR(0x08040000 + regoff));
+}
+static void ed64_regwrite(u32 value, int regoff) {
+	__raw_writel(value, (__iomem void *)KSEG1ADDR(0x08040000 + regoff));
+	pi_wait();
+}
+#endif
+
 //#define EARLY_UART_BASE		0x007F0000
 //static __iomem void *uart_membase = (__iomem void *) KSEG1ADDR(EARLY_UART_BASE);
 void prom_putchar(unsigned char ch)
@@ -420,24 +444,24 @@ void prom_putchar(unsigned char ch)
 	__raw_writel(ch, (__iomem void *)KSEG1ADDR(0x04400038));
 #elif 1
 	// EverDrive-64 v3
+	static int mute = 0;
 	unsigned long flags;
 	local_irq_save(flags);
 
-	__raw_readl((__iomem void *)KSEG1ADDR(0x08040000));
-	__raw_writel(0x1234, (__iomem void *)KSEG1ADDR(0x08040020));
+	/* for fast(?) standalone boot */
+	if(mute) {
+		return;
+	}
+
+	ed64_regwrite(0x1234, 0x20);
 
 	// wait for ED64dma, busyloop...
-	for(;;) {
-		__raw_readl((__iomem void *)KSEG1ADDR(0x08040000));
-		if((__raw_readl((__iomem void *)KSEG1ADDR(0x08040004)) & 1) == 0) {
-			break;
-		}
-	}
+	while(ed64_regread(0x04) & 1) /*wait-while-ed64-dmabusy*/ ;
 
 	// write buffer
 	// NOTE a bit lower address for avoid clash with ed64 serial
-	__raw_readl((__iomem void *)KSEG1ADDR(0x08040000));
 	__raw_writel(0x01000000 | ((unsigned)ch << 16), (__iomem void *)KSEG1ADDR(0x13FFF000));
+	pi_wait();
 #if 0
 	// wipe rest... should be done first time only
 	{
@@ -453,23 +477,19 @@ void prom_putchar(unsigned char ch)
 	}
 #endif
 
-	__raw_readl((__iomem void *)KSEG1ADDR(0x08040000));
-	__raw_writel(0x03FFf000/0x800, (__iomem void *)KSEG1ADDR(0x0804000C));
-	__raw_readl((__iomem void *)KSEG1ADDR(0x08040000));
-	__raw_writel(0x0200/0x200-1, (__iomem void *)KSEG1ADDR(0x08040008));
-	__raw_readl((__iomem void *)KSEG1ADDR(0x08040000));
-	__raw_writel(4, (__iomem void *)KSEG1ADDR(0x08040014));
+	ed64_regwrite(0x03FFf000/0x800, 0x0C);
+	ed64_regwrite(0x0200/0x200-1, 0x08);
+	ed64_regwrite(4, 0x14);
 
 	// wait for ED64dma, busyloop...
-	for(;;) {
-		__raw_readl((__iomem void *)KSEG1ADDR(0x08040000));
-		if((__raw_readl((__iomem void *)KSEG1ADDR(0x08040004)) & 1) == 0) {
-			break;
-		}
+	while(ed64_regread(0x04) & 1) /*wait-while-ed64-dmabusy*/ ;
+
+	/* mute when DMATOUT */
+	if(ed64_regread(0x04) & 2) {
+		mute = 1;
 	}
 
-	__raw_readl((__iomem void *)KSEG1ADDR(0x08040000));
-	__raw_writel(0, (__iomem void *)KSEG1ADDR(0x08040020));
+	ed64_regwrite(0, 0x20);
 
 	local_irq_restore(flags);
 #endif
