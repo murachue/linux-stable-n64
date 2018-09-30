@@ -148,22 +148,11 @@ static void ed64_break_ctl(struct uart_port *port, int break_state)
 {
 }
 
+/* requires n64pi_begin and n64pi_ed64_enable. */
 static int ed64_tx(struct uart_port *port, int emit_error)
 {
 	struct ed64_private *ed64 = (struct ed64_private *)port->private_data;
 	struct n64pi * const pi = ed64->pi;
-
-	if (n64pi_trybegin(pi) != N64PI_ERROR_SUCCESS) {
-		/* we are in some other n64pi user context... maybe from console write. tx later (on next polling). */
-		return 0;
-	}
-
-	if (n64pi_ed64_enable(pi) != N64PI_ERROR_SUCCESS) {
-		if (emit_error) {
-			pr_err("%s: could not enable ed64regs\n", __func__);
-		}
-		goto err;
-	}
 
 	/* ram(ed64->xmitbuf) -> cart */
 	// TODO variable length for shorter DMA time? but it is small enough...
@@ -198,23 +187,11 @@ static int ed64_tx(struct uart_port *port, int emit_error)
 		/* ED64 DMA is running */
 	}
 
-	if (n64pi_ed64_disable(pi) != N64PI_ERROR_SUCCESS) {
-		if (emit_error) {
-			pr_err("%s: could not disable ed64regs\n", __func__);
-		}
-		goto err;
-	}
-
-	n64pi_end(pi);
-
 	ed64->xmitbuf[0] = 0; /* clear buffer */
 
 	return 0;
 
 err:
-	// must be ended even when error.
-	n64pi_end(pi);
-
 	return 1;
 }
 
@@ -293,6 +270,7 @@ static void ed64_write(struct uart_port *port)
  * This reads all available data from the ed64's fifo and pushes
  * the data to the tty layer.
  */
+/* requires n64pi_begin and n64pi_ed64_enable. */
 static void ed64_read(struct uart_port *port)
 {
 	// TODO avoid reentrant with ed64_write??
@@ -302,28 +280,22 @@ static void ed64_read(struct uart_port *port)
 	struct n64pi * const pi = ed64->pi;
 	unsigned char __attribute((aligned(8))) recvbuf[256]; /* 1+255 */
 
-	n64pi_begin(pi);
-
-	if (n64pi_ed64_enable(pi) != N64PI_ERROR_SUCCESS) {
-		goto err;
-	}
-
 	ed64->status = n64pi_ed64_regread(pi, 0x04);
 	if (ed64->status & 1) {
 		// ED64 DMA is still running(!?)... poll read later (at timer handler).
 		// this is unexpected status, but recoverable.
 		pr_warn("%s: ED64 DMA is already running that is unexpected... poll later.\n", __func__);
-		goto err;
+		return;
 	}
 
 	if (n64pi_ed64_regwrite(pi, 512/512 - 1, 0x08) != N64PI_ERROR_SUCCESS) { // dmalen in 512bytes - 1
-		goto err;
+		return;
 	}
 	if (n64pi_ed64_regwrite(pi, ed64->rombase / 2048, 0x0c) != N64PI_ERROR_SUCCESS) { // dmaaddr in 2048bytes
-		goto err;
+		return;
 	}
 	if (n64pi_ed64_regwrite(pi, 3, 0x14) != N64PI_ERROR_SUCCESS) { // dmacfg = 3(fifo2ram)
-		goto err;
+		return;
 	}
 
 	while ((ed64->status = n64pi_ed64_regread(pi, 0x04)) & 1) {
@@ -332,17 +304,11 @@ static void ed64_read(struct uart_port *port)
 
 	// ED64 DMA is done.
 
-	if (n64pi_ed64_disable(pi) != N64PI_ERROR_SUCCESS) {
-		goto err;
-	}
-
-	// Get rx buffer in ED64 ROM
+	// Get rx buffer in ED64 ROM (does not require ed64_enable)
 	if (n64pi_read_dma(pi, recvbuf, 0x10000000 + ed64->rombase, 256) != N64PI_ERROR_SUCCESS) {
 		pr_err("%s: DMA transfer error\n", __func__);
-		goto err;
+		return;
 	}
-
-	n64pi_end(pi);
 
 	{
 		const unsigned char *pbuf = recvbuf; // that just be filled
@@ -411,10 +377,6 @@ static void ed64_read(struct uart_port *port)
 		}
 	}
 
-	return;
-
-err:
-	n64pi_end(pi);
 	return;
 }
 
@@ -541,8 +503,6 @@ static void ed64_status(struct uart_port *port)
 
 	ed64->status = n64pi_ed64_regread(pi, 0x04);
 
-	n64pi_end(pi);
-
 	// first dispatch follows.
 
 	// if DMABUSY is low (no ED64 DMA is running) and rxf# is low (=have rx), do read.
@@ -558,9 +518,11 @@ static void ed64_status(struct uart_port *port)
 		}
 	}
 
-	return;
+	n64pi_ed64_disable(pi);
+
 err:
 	n64pi_end(pi);
+
 	return;
 }
 
@@ -778,14 +740,37 @@ static void ed64_console_write(struct console *co, const char *buf, unsigned cou
 	// TODO check ED64 DMA status
 	// TODO spinlock_irq port.lock
 	struct ed64_private *ed64 = port.private_data;
+	struct n64pi * const pi = ed64->pi;
+
 	unsigned pos = ed64->xmitbuf[0];
 	unsigned avail = 255 - pos;
 	unsigned len = (avail < count) ? avail : count; // min(avail, count)
 	ed64->xmitbuf[0] += len;
 	memcpy(ed64->xmitbuf + 1 + pos, buf, len);
+
+	if (n64pi_trybegin(pi) != N64PI_ERROR_SUCCESS) {
+		/* we are in some other n64pi user context... maybe from console write. tx later (on next polling). */
+		/* don't write any message, it is garbage and will overflow the tx buffer. */
+		return;
+	}
+
+	if (n64pi_ed64_enable(pi) != N64PI_ERROR_SUCCESS) {
+		//pr_err("%s: could not enable ed64regs\n", __func__); // don't emit any message: cause recurse!
+		/* cleanup and bye */
+		n64pi_end(pi);
+		return;
+	}
+
 	if (ed64_tx(&port, 0) != 0) {
 		// error... but putting message cause recursive write. do nothing.
 	}
+
+	if (n64pi_ed64_disable(pi) != N64PI_ERROR_SUCCESS) {
+		//pr_err("%s: could not disable ed64regs\n", __func__); // don't emit any message: cause recurse!
+		/* but no way. fallthrough */
+	}
+
+	n64pi_end(pi);
 }
 
 static int ed64_console_setup(struct console *co, char *options)
