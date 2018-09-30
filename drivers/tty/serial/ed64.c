@@ -835,6 +835,37 @@ static struct uart_ops ed64_ops = {
 #endif
 };
 
+/* https://stackoverflow.com/questions/37237835/how-to-attach-file-operations-to-sysfs-attribute-in-platform-driver
+ * NOTE: above says "set to driver.groups is correct and set to device.groups in probe() is wrong",
+ *       but it is wrong on device-dependent context. (not "driver"-context!!)
+ *       and they are TOTALLY different. driver_attribute[] for driver, device_attribute[] for device.
+ *       driver_attribute's show/store(dev_driver*,char*buf...) is DIFFERENT from
+ *       device_attribute's show/store(device*,dev_attr*,char*buf...)!!
+ * NOTE2: http://kroah.com/log/blog/2013/06/26/how-to-create-a-sysfs-file-correctly/
+ *       this "mute" attribute is not intended for udev matching, and adding to driver seems not correct,
+ *       so use (racy) device_create_file method.
+ */
+static ssize_t mute_show(struct device *dev, struct device_attribute *attr, char *buf)
+{
+	struct ed64_private *ed64 = dev_get_drvdata(dev);
+	int len;
+
+	len = sprintf(buf, "%ld\n", ed64->mute);
+	if (len <= 0)
+		dev_err(dev, "Invalid sprintf len: %d\n", len);
+
+	return len;
+}
+static ssize_t mute_store(struct device *dev, struct device_attribute *attr, const char *buf, size_t count)
+{
+	struct ed64_private *ed64 = dev_get_drvdata(dev);
+
+	kstrtol(buf, 10, &ed64->mute);
+
+	return count;
+}
+static DEVICE_ATTR_RW(mute);
+
 /**
  * ed64_probe - Serial ED64 initialization procedure.
  *
@@ -865,6 +896,11 @@ static int ed64_probe(struct platform_device *pdev)
 	ed64->mute = 0;
 
 	platform_set_drvdata(pdev, ed64); /* ed64 set to uart_port, but same here for sysfs attributes. */
+	if (device_create_file(&pdev->dev, &dev_attr_mute)) {
+		pr_err("ed64tty: could not device_create_file.\n");
+		kfree(ed64);
+		return 1;
+	}
 
 	/* register a port in driver */
 	port.iobase = 0; // no I/O port
@@ -930,39 +966,11 @@ static int ed64_remove(struct platform_device *pdev)
 	return 0;
 }
 
-// https://stackoverflow.com/questions/37237835/how-to-attach-file-operations-to-sysfs-attribute-in-platform-driver
-static ssize_t mute_show(struct device *dev, struct device_attribute *attr, char *buf)
-{
-	struct ed64_private *ed64 = dev_get_drvdata(dev);
-	int len;
-
-	len = sprintf(buf, "%ld\n", ed64->mute);
-	if (len <= 0)
-		dev_err(dev, "Invalid sprintf len: %d\n", len);
-
-	return len;
-}
-static ssize_t mute_store(struct device *dev, struct device_attribute *attr, const char *buf, size_t count)
-{
-	struct ed64_private *ed64 = dev_get_drvdata(dev);
-
-	kstrtol(buf, 10, &ed64->mute);
-
-	return count;
-}
-static DEVICE_ATTR_RW(mute);
-static struct attribute *ed64_attrs[] = {
-	&dev_attr_mute.attr,
-	NULL
-};
-ATTRIBUTE_GROUPS(ed64);
-
 static struct platform_driver ed64_driver = {
 	.probe  = ed64_probe,
 	.remove = ed64_remove,
 	.driver = {
 		.name = "n64pi-ed64tty",
-		.groups = ed64_groups,
 	},
 };
 
