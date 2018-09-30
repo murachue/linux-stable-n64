@@ -52,6 +52,7 @@ struct ed64_private {
 	uint32_t rombase; // ROM area that is used for rx/tx (2048 bytes align required by ED64 DMA!)
 	uint32_t status; // last polled status
 	unsigned char __attribute((aligned(8))) xmitbuf[256]; // 255+1-bytes DMA buffer, NOTE: must be 8 bytes aligned (required by PI DMA)
+	long mute; // holds mute state, that is activated on usb-dma-timedout.
 };
 
 static struct uart_port port;
@@ -154,6 +155,11 @@ static int ed64_tx(struct uart_port *port, int emit_error)
 	struct ed64_private *ed64 = (struct ed64_private *)port->private_data;
 	struct n64pi * const pi = ed64->pi;
 
+	if (ed64->mute) {
+		/* muted... return without tx nor consume xmitbuf */
+		return 0;
+	}
+
 	/* ram(ed64->xmitbuf) -> cart */
 	// TODO variable length for shorter DMA time? but it is small enough...
 	if (n64pi_write_dma(pi, 0x10000000 + ed64->rombase, ed64->xmitbuf, 256) != N64PI_ERROR_SUCCESS) {
@@ -187,7 +193,14 @@ static int ed64_tx(struct uart_port *port, int emit_error)
 		/* ED64 DMA is running */
 	}
 
-	ed64->xmitbuf[0] = 0; /* clear buffer */
+	if (ed64->status & 2) {
+		/* tx timed out: mute to quick run on standalone. */
+		ed64->mute = 1;
+		/* mute then notice. */
+		pr_warn("%s: ED64 DMA timed out; muting!", __func__);
+	} else {
+		ed64->xmitbuf[0] = 0; /* clear buffer */
+	}
 
 	return 0;
 
@@ -742,11 +755,17 @@ static void ed64_console_write(struct console *co, const char *buf, unsigned cou
 	struct ed64_private *ed64 = port.private_data;
 	struct n64pi * const pi = ed64->pi;
 
+	/* enqueue message even when muted, to be outputed when un-muted. */
 	unsigned pos = ed64->xmitbuf[0];
 	unsigned avail = 255 - pos;
 	unsigned len = (avail < count) ? avail : count; // min(avail, count)
 	ed64->xmitbuf[0] += len;
 	memcpy(ed64->xmitbuf + 1 + pos, buf, len);
+
+	if (ed64->mute) {
+		/* fast-path: muted, don't any ed64 thing. */
+		return;
+	}
 
 	if (n64pi_trybegin(pi) != N64PI_ERROR_SUCCESS) {
 		/* we are in some other n64pi user context... maybe from console write. tx later (on next polling). */
@@ -843,6 +862,9 @@ static int ed64_probe(struct platform_device *pdev)
 	ed64->rombase = (0x04000000-0x0800); // TODO configurable or IORESOURCE_MEM/IO?
 	ed64->status = 0; /* TODO is 0 valid for initialize?? (seems ok, it means wrongly "can TX&RX", but overwritten by poll.) */
 	ed64->xmitbuf[0] = 0; /* make buffer empty */
+	ed64->mute = 0;
+
+	platform_set_drvdata(pdev, ed64); /* ed64 set to uart_port, but same here for sysfs attributes. */
 
 	/* register a port in driver */
 	port.iobase = 0; // no I/O port
@@ -908,11 +930,39 @@ static int ed64_remove(struct platform_device *pdev)
 	return 0;
 }
 
+// https://stackoverflow.com/questions/37237835/how-to-attach-file-operations-to-sysfs-attribute-in-platform-driver
+static ssize_t mute_show(struct device *dev, struct device_attribute *attr, char *buf)
+{
+	struct ed64_private *ed64 = dev_get_drvdata(dev);
+	int len;
+
+	len = sprintf(buf, "%ld\n", ed64->mute);
+	if (len <= 0)
+		dev_err(dev, "Invalid sprintf len: %d\n", len);
+
+	return len;
+}
+static ssize_t mute_store(struct device *dev, struct device_attribute *attr, const char *buf, size_t count)
+{
+	struct ed64_private *ed64 = dev_get_drvdata(dev);
+
+	kstrtol(buf, 10, &ed64->mute);
+
+	return count;
+}
+static DEVICE_ATTR_RW(mute);
+static struct attribute *ed64_attrs[] = {
+	&dev_attr_mute.attr,
+	NULL
+};
+ATTRIBUTE_GROUPS(ed64);
+
 static struct platform_driver ed64_driver = {
 	.probe  = ed64_probe,
 	.remove = ed64_remove,
 	.driver = {
-	    .name = "n64pi-ed64tty",
+		.name = "n64pi-ed64tty",
+		.groups = ed64_groups,
 	},
 };
 
