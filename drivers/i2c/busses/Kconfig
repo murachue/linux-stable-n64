@@ -1198,4 +1198,14 @@ config I2C_OPAL
 	  This driver can also be built as a module. If so, the module will be
 	  called as i2c-opal.
 
+config I2C_ED64
+	tristate "EverDrive-64 I2C driver"
+	depends on NINTENDO64
+	default n
+	help
+	  This exposes the EverDrive-64 i2c busses to the linux i2c layer.
+
+	  This driver can also be built as a module. If so, the module will be
+	  called as i2c-ed64.
+
 endmenu
