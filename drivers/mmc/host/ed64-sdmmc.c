@@ -221,6 +221,8 @@ starttime=TRANSFER_TIMEOUT-i;
 		return -EIO;
 	}
 
+//{static int c=0; if(2<++c) for (i = 0; i < len; i++) buf[i] = 0x11;} // TODO DEBUG DELETEME
+
 	return 0;
 }
 
@@ -336,8 +338,8 @@ static void ed64mmc_request(struct mmc_host *mmc, struct mmc_request *mrq)
 	struct device *dev = host->dev;
 	struct n64pi *pi = host->pi;
 
-	dev_dbg(dev, "=============================\n");
-	dev_dbg(dev, "ed64mmc_request opcode=%i arg=%08X spicfg=%02X data=%p\n", cmd->opcode, cmd->arg, host->spicfg, data);
+	pr_debug("=============================\n");
+	pr_debug("ed64mmc_request opcode=%i arg=%08X spicfg=%02X data=%p\n", cmd->opcode, cmd->arg, host->spicfg, data);
 
 	n64pi_begin(pi);
 
@@ -441,6 +443,7 @@ static void ed64mmc_request(struct mmc_host *mmc, struct mmc_request *mrq)
 			        data->blksz, data->blocks, data->sg_len, data->sg->length);
 			*/
 
+//if(0x100<data->blksz){extern void stub(void);stub();}
 			for (i = 0; i < data->blocks; i++) {
 				size_t len = data->blksz;
 				u8 *buf;
@@ -461,7 +464,7 @@ static void ed64mmc_request(struct mmc_host *mmc, struct mmc_request *mrq)
 					cmd->error = result;
 					break;
 				} else {
-					dev_dbg(dev, "transfer ok: %x bytes\n", len);
+					pr_debug("transfer ok: %xh bytes\n", len);
 					data->bytes_xfered += len;
 				}
 			}
@@ -469,7 +472,7 @@ static void ed64mmc_request(struct mmc_host *mmc, struct mmc_request *mrq)
 			/* verify cmd now */
 
 			if (bits != cmd->opcode) {
-				dev_dbg(dev, "mis opcode echo: exp=%02X act=%02X\n", cmd->opcode, bits);
+				pr_debug("mis opcode echo: exp=%02X act=%02X\n", cmd->opcode, bits);
 				cmd->error = -EILSEQ;
 			}
 
@@ -481,7 +484,7 @@ static void ed64mmc_request(struct mmc_host *mmc, struct mmc_request *mrq)
 				if (cmdresp[4] != (crc | 1)) {
 					/* crc error */
 					cmd->error = -EIO;
-					dev_dbg(dev, " found crc error: expect=%02X actual=%02X\n", crc | 1, cmdresp[4]);
+					pr_debug(" found crc error: expect=%02X actual=%02X\n", crc | 1, cmdresp[4]);
 				}
 			}
 
@@ -514,11 +517,11 @@ static void ed64mmc_request(struct mmc_host *mmc, struct mmc_request *mrq)
 				cmd->error = -ETIMEDOUT;
 			}
 		} else if ((cmd->flags & MMC_RSP_OPCODE) && (bits != cmd->opcode)) {
-			dev_dbg(dev, "mis opcode echo: exp=%02X act=%02X\n", cmd->opcode, bits);
+			pr_debug("mis opcode echo: exp=%02X act=%02X\n", cmd->opcode, bits);
 			cmd->error = -EILSEQ;
 		}
 
-		dev_dbg(dev, "expect response or cmd0; try=%d first_err=%d\n", try, cmd->error);
+		pr_debug("expect response or cmd0; try=%d first_err=%d\n", try, cmd->error);
 
 		/* receive response and crc if not timed out (but incl. invalid opcode echo, excl. timeout with opcode==0) */
 		if (try != 0) {
@@ -541,7 +544,7 @@ static void ed64mmc_request(struct mmc_host *mmc, struct mmc_request *mrq)
 				cmd->resp[i] = word;
 			}
 
-			dev_dbg(dev, " response0=%08X\n", cmd->resp[0]);
+			pr_debug(" response0=%08X\n", cmd->resp[0]);
 
 			/* read crc and test it if required */
 			{
@@ -561,12 +564,12 @@ static void ed64mmc_request(struct mmc_host *mmc, struct mmc_request *mrq)
 				if ((cmd->flags & MMC_RSP_CRC) && (trail != (crc | 1))) {
 					/* crc error */
 					cmd->error = -EIO;
-					dev_dbg(dev, " found crc error: expect=%02X actual=%02X\n", crc | 1, trail);
+					pr_debug(" found crc error: expect=%02X actual=%02X\n", crc | 1, trail);
 				}
 			}
 		}
 	} else {
-		dev_dbg(dev, "expect no response\n");
+		pr_debug("expect no response\n");
 	}
 
 	host->lastopcode = cmd->opcode;
@@ -576,7 +579,7 @@ static void ed64mmc_request(struct mmc_host *mmc, struct mmc_request *mrq)
 	n64pi_end(pi);
 
 	mmc_request_done(mmc, mrq);
-	dev_dbg(dev, "=============================\n");
+	pr_debug("=============================\n");
 }
 
 static void ed64mmc_set_ios(struct mmc_host *mmc, struct mmc_ios *ios)
