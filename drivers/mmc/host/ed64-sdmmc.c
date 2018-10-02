@@ -451,6 +451,7 @@ static void ed64mmc_request(struct mmc_host *mmc, struct mmc_request *mrq)
 				int result;
 				page = sg_page(data->sg);
 
+				/* TODO: it will stride pages, but this maps only first page... in N64, memory is only 8MiB, fits in kseg0, miraclously works. */
 				buf = kmap(page) + data->sg->offset + (len * i);
 				if (data->flags & MMC_DATA_READ) {
 					result = ed64mmc_block_read(host, buf, len);
@@ -666,8 +667,14 @@ static int ed64mmc_probe(struct platform_device *pdev)
 	mmc->ocr_avail = MMC_VDD_32_33 | MMC_VDD_33_34; /* TODO I don't know about voltage on EverDrive... */
 	mmc->caps |= MMC_CAP_4_BIT_DATA | MMC_CAP_NEEDS_POLL; /* TODO I don't know much about mmc subsystem... stay left as sdricoh. */
 
+	/*
+	 * XXX: adopt mmc/core/host.c:mmc_alloc_host default value...
+	 *      setting following value will cause oops->panic in account_*_time...
+	 *      invoked by destructing their memory by ed64mmc_block_read! (though I did write only in right area!?)
+	 *      indicator: mrq->cmd->data->sg->offset = 0x80 (if correct, it is 0)
 	mmc->max_seg_size = 4 * 512;
 	mmc->max_blk_size = 512;
+	*/
 
 	result = mmc_add_host(mmc);
 
