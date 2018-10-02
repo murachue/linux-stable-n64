@@ -25,9 +25,9 @@
 #error n64cart does not support device tree yet
 #endif
 
-/* enable dev_dbg? */
-#define DEBUG
-#define VERBOSE_DEBUG
+/* enable dev_dbg/pr_debug? */
+//#define DEBUG
+//#define VERBOSE_DEBUG
 
 #include <linux/delay.h>
 #include <linux/highmem.h>
@@ -220,8 +220,6 @@ starttime=TRANSFER_TIMEOUT-i;
 		}
 		return -EIO;
 	}
-
-//{static int c=0; if(2<++c) for (i = 0; i < len; i++) buf[i] = 0x11;} // TODO DEBUG DELETEME
 
 	return 0;
 }
