@@ -28,11 +28,21 @@ struct ed64_i2c {
 	struct i2c_adapter adapter;
 };
 
+static void ed64_i2c_write(struct n64pi *pi, uint32_t clk_dat)
+{
+	n64pi_ed64_regwrite(pi, clk_dat, 0x30);
+}
+
+static unsigned int ed64_i2c_read(struct n64pi *pi)
+{
+	return n64pi_ed64_regread(pi, 0x30);
+}
+
 static void i2c_start(struct n64pi *pi)
 {
-	n64pi_ed64_regwrite(pi, 5, 0x30); /* clk|dat */
-	n64pi_ed64_regwrite(pi, 4, 0x30); /* clk|~dat (start condition: dat changes while clk is raised) */
-	n64pi_ed64_regwrite(pi, 0, 0x30); /* ~clk(|~dat) */
+	ed64_i2c_write(pi, 5); /* clk|dat */
+	ed64_i2c_write(pi, 4); /* clk|~dat (start condition: dat changes while clk is raised) */
+	ed64_i2c_write(pi, 0); /* ~clk(|~dat) */
 }
 
 static int i2c_writebyte(struct n64pi *pi, uint32_t byte)
@@ -40,14 +50,14 @@ static int i2c_writebyte(struct n64pi *pi, uint32_t byte)
 	int i, r;
 	for (i = 0; i < 8; i++) {
 		uint32_t v = (byte >> (7 - i)) & 1;
-		n64pi_ed64_regwrite(pi, v, 0x30); /* prepare dat while ~clk */
-		n64pi_ed64_regwrite(pi, 4 | v, 0x30); /* raise clk with dat: acq it, device! */
+		ed64_i2c_write(pi, v); /* prepare dat while ~clk */
+		ed64_i2c_write(pi, 4 | v); /* raise clk with dat: acq it, device! */
 	}
 
-	n64pi_ed64_regwrite(pi, 1, 0x30); /* ~clk|dat */
-	n64pi_ed64_regwrite(pi, 5, 0x30); /* clk|dat: raise clk: urge device sends ack (dat=1 required: pull-up open-drain) */
-	r = n64pi_ed64_regread(pi, 0x30) & 1; /* sense dat */
-	n64pi_ed64_regwrite(pi, 1, 0x30); /* ~clk|dat */
+	ed64_i2c_write(pi, 1); /* ~clk|dat */
+	ed64_i2c_write(pi, 5); /* clk|dat: raise clk: urge device sends ack (dat=1 required: pull-up open-drain) */
+	r = ed64_i2c_read(pi) & 1; /* sense dat */
+	ed64_i2c_write(pi, 1); /* ~clk|dat */
 
 	return r;
 }
@@ -57,24 +67,24 @@ static uint32_t i2c_readbyte(struct n64pi *pi, int nack)
 	int i;
 	uint32_t r = 0;
 	for (i = 0; i < 8; i++) {
-		n64pi_ed64_regwrite(pi, 1, 0x30); /* lower clk: urge device changes dat */
-		n64pi_ed64_regwrite(pi, 5, 0x30); /* raise clk: dat is stable... hopefully. */
-		r = (r << 1) | (n64pi_ed64_regread(pi, 0x30) & 1);
+		ed64_i2c_write(pi, 1); /* lower clk: urge device changes dat */
+		ed64_i2c_write(pi, 5); /* raise clk: dat is stable... hopefully. */
+		r = (r << 1) | (ed64_i2c_read(pi) & 1);
 	}
 
 	nack = !!nack; /* 0 or 1 */
-	n64pi_ed64_regwrite(pi, nack, 0x30); /* ~clk|[nack] */
-	n64pi_ed64_regwrite(pi, 4 | nack, 0x30); /* clk|<nack>: raise clk: send [n]ack */
-	r = n64pi_ed64_regread(pi, 0x30) & 1; /* sense dat */
-	n64pi_ed64_regwrite(pi, nack, 0x30); /* ~clk|[nack] */
+	ed64_i2c_write(pi, nack); /* ~clk|[nack] */
+	ed64_i2c_write(pi, 4 | nack); /* clk|<nack>: raise clk: send [n]ack */
+	r = ed64_i2c_read(pi) & 1; /* sense dat */
+	ed64_i2c_write(pi, nack); /* ~clk|[nack] */
 
 	return r;
 }
 
 static void i2c_stop(struct n64pi *pi)
 {
-	n64pi_ed64_regwrite(pi, 4, 0x30); /* clk|~dat */
-	n64pi_ed64_regwrite(pi, 5, 0x30); /* clk|dat (stop condition: dat changes while clk is raised) */
+	ed64_i2c_write(pi, 4); /* clk|~dat */
+	ed64_i2c_write(pi, 5); /* clk|dat (stop condition: dat changes while clk is raised) */
 }
 
 static int ed64_i2c_xfer(struct i2c_adapter *adapter, struct i2c_msg *msgs, int num)
