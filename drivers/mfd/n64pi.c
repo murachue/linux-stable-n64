@@ -566,6 +566,7 @@ static const struct mfd_cell n64pi_cells[] = {
 	{ .name = "n64pi-cart", .of_compatible = "nintendo,pi-cart", },
 	{ .name = "n64pi-ed64tty", .of_compatible = "nintendo,pi-ed64tty" }, // TODO OF? CONFIG?
 	{ .name = "n64pi-ed64mmc", .of_compatible = "nintendo,pi-ed64mmc" }, // TODO OF? CONFIG?
+	{ .name = "n64pi-ed64i2c", .of_compatible = "nintendo,pi-ed64i2c" }, // TODO OF? CONFIG?
 	// TODO 64drive tty support
 };
 

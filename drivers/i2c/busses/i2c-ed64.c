@@ -75,7 +75,6 @@ static uint32_t i2c_readbyte(struct n64pi *pi, int nack)
 	nack = !!nack; /* 0 or 1 */
 	ed64_i2c_write(pi, nack); /* ~clk|[nack] */
 	ed64_i2c_write(pi, 4 | nack); /* clk|<nack>: raise clk: send [n]ack */
-	r = ed64_i2c_read(pi) & 1; /* sense dat */
 	ed64_i2c_write(pi, nack); /* ~clk|[nack] */
 
 	return r;
