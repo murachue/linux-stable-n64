@@ -229,14 +229,17 @@ static int ed64mmc_block_write(struct ed64mmc_host *host, const u8 *buf, int len
 	int crcs[4] = {0};
 	int i, j, d, resp;
 
+	/* TODO support 1-bit width */
+	if (host->datwidth == 0) {
+		return -EPROTO;
+	}
+
 	/* 8bit data write */
 	ed64_spicfg(host, ED64_SPICFG_DAT, 0);
 
-	/* stable then put start bit on 4 DATs */
-	ed64_spiwrite(pi, 0xFF);
-	ed64_spiwrite(pi, 0xF0);
+	ed64_spiwrite(pi, 0xFF); /* stable */
+	ed64_spiwrite(pi, 0xF0); /* start bit on 4 DATs */
 
-	/* TODO support 1-bit width */
 	/* write data with crc16 calc */
 	for (i = 0; i < len; i++) {
 		u32 byte = *buf++;
@@ -266,41 +269,10 @@ static int ed64mmc_block_write(struct ed64mmc_host *host, const u8 *buf, int len
 	/* 4lines-1bit data read */
 	ed64_spicfg(host, ED64_SPICFG_1BIT | ED64_SPICFG_DAT | ED64_SPICFG_RD, 0);
 
-	/* seek for DAT0 response start bit...?? TODO where is this spec? I could find only SPI control token... but this is SD mode. */
+	/* wait until busy */
 	for (i = TRANSFER_TIMEOUT; i; i--) {
-		/* DAT0 is low: complete...??? */
-		if ((ed64_spiread(pi, 0xFF/* previously received as 0x?F */) & 1) == 0) {
-			break;
-		}
-	}
-	if (i == 0) {
-		return -ETIMEDOUT;
-	}
-
-	/* receive DAT0 response...?? */
-	resp = 0;
-	for (i = 0; i < 3; i++) {
-		resp <<= 1;
-		resp |= ed64_spiread(pi, 0xFF/* previously received as 0x?F */) & 1;
-	}
-
-	if (resp == 0x05) {
-		/* wrong sent CRC... */
-		return -EIO; /* TODO what should be returned? */
-	} else if (resp == 0x06) { /* TODO really?? */
-		/* write error... */
-		return -EIO;
-	} else if (resp != 0x02) {
-		/* something unexpected... */
-		return -EILSEQ; /* TODO is there EUNKNOWNERROR? */
-	}
-
-	/* wait for end of busy...?? */
-	/* 8bit data read */
-	ed64_spicfg(host, ED64_SPICFG_DAT | ED64_SPICFG_RD, 0);
-	ed64_spiwrite(pi, 0xFF); /* write something to clock...?? */
-	for (i = TRANSFER_TIMEOUT * 2; i; i--) { /* TODO twice is just ED64 does... have some mean? */
-		if ((ed64_spiread(pi, 0xFF/* previously received as 0x?F */) & 0xFF) == 0xFF) {
+		/* DAT0 is high: complete */
+		if (ed64_spiread(pi, 0xFF/* previously received as 0x?F */) & 1) {
 			break;
 		}
 	}
