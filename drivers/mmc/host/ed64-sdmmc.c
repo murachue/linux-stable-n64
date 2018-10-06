@@ -22,12 +22,11 @@
 
 /* TODO OpenFirmware DeviceTree support? */
 #ifdef CONFIG_USE_OF
-#error n64cart does not support device tree yet
+#error ed64-sdmmc does not support device tree yet
 #endif
 
 /* enable dev_dbg/pr_debug? */
 //#define DEBUG
-//#define VERBOSE_DEBUG
 
 #include <linux/delay.h>
 #include <linux/highmem.h>
@@ -328,6 +327,129 @@ static int crc7_update(int crc, int byte) {
 	return crc;
 }
 
+static void ed64mmc_send_command(struct ed64mmc_host *host, struct mmc_command *cmd, int cmdwithdat)
+{
+	struct n64pi *pi = host->pi;
+
+	/* 8bit command write */
+	ed64_spicfg(host, 0, cmdwithdat);
+
+	{
+		u8 opbyte = 0x40 | cmd->opcode;
+		u32 arg = cmd->arg;
+		int i, crc;
+
+		ed64_spiwrite(pi, 0xFF); /* dummy clock */
+
+		ed64_spiwrite(pi, opbyte);
+		crc = crc7_update(0, opbyte);
+
+		for (i = 0; i < 4; i++) {
+			int abyte = (arg >> 24) & 0xFF;
+			ed64_spiwrite(pi, abyte);
+			crc = crc7_update(crc, abyte);
+			arg <<= 8;
+		}
+
+//		dev_dbg(dev, "crc=%02X\n", crc | 1);
+		ed64_spiwrite(pi, crc | 1);
+	}
+}
+
+/* returns a byte received, or minus value if finding start bit timed out */
+static int ed64mmc_recv_cmd_start(struct ed64mmc_host *host, int cmdwithdat)
+{
+	struct n64pi *pi = host->pi;
+	int try, bits = 0xFF; /* fill with all 1s is important */
+
+	/* 1bit command read */
+	ed64_spicfg(host, ED64_SPICFG_1BIT | ED64_SPICFG_RD, cmdwithdat);
+
+	/* seek for start-bit and transmission-bit */
+	for (try = CMD_TIMEOUT; try; try--) {
+		//			u32 obits = bits;
+		bits = ed64_spiread(pi, bits/* previously received */); /* data magically shifts in from lsb */
+		if ((bits & 0xC0) == 0) {
+			/* found start-bit and transmission-bit! */
+			//				dev_dbg(dev, "start-bit found: %08X->%08X\n", obits, bits);
+			/* convert into byte (strip out ED64 status in high halfword) to comparable with cmd->opcode */
+			return bits & 0xFF;
+		}
+	}
+
+	return -1;
+}
+
+/* for non-data commands. */
+static void ed64mmc_recv_cmd(struct ed64mmc_host *host, struct mmc_command *cmd)
+{
+	struct n64pi *pi = host->pi;
+	int bits;
+
+	bits = ed64mmc_recv_cmd_start(host, 0);
+
+	if (bits < 0) {
+		if (cmd->opcode != 0) {
+			cmd->error = -ETIMEDOUT;
+		}
+	} else if ((cmd->flags & MMC_RSP_OPCODE) && (bits != cmd->opcode)) {
+		pr_debug("mis opcode echo: exp=%02X act=%02X\n", cmd->opcode, bits);
+		cmd->error = -EILSEQ;
+	}
+
+	pr_debug("expect response or cmd0; bits=%d first_err=%d\n", bits, cmd->error);
+
+	/* don't receive following bytes if timed out (not including invalid opcode echo) */
+	if (bits < 0) {
+		return;
+	}
+
+	{
+		int rwords = (cmd->flags & MMC_RSP_136) ? 4 : 1;
+		int i, j, crc = 0, ncrc = (cmd->flags & MMC_RSP_136) ? 0 : crc7_update(0, bits);
+
+		/* 8bit command read */
+		ed64_spicfg(host, ED64_SPICFG_RD, 0);
+
+		/* read response word(s) */
+		for (i = 0; i < rwords; i++) {
+			uint32_t word = 0;
+			for (j = 0; j < 4; j++) {
+				u32 rbyte;
+				rbyte	= ed64_spiread(pi, 0xFF/* something to clock */) & 0xFF;
+				word = (word << 8) | rbyte;
+				crc = ncrc;
+				ncrc = crc7_update(ncrc, rbyte);
+			}
+			cmd->resp[i] = word;
+		}
+
+		pr_debug(" response0=%08X\n", cmd->resp[0]);
+
+		/* read crc and test it if required */
+		{
+			int trail;
+
+			trail	= ed64_spiread(pi, 0xFF/* something to clock */) & 0xFF;
+
+			/* note: R3 runs this but useless. */
+			if (cmd->flags & MMC_RSP_136) {
+				trail = cmd->resp[3] & 0xFF;
+				/* note: crc must be kept as previous of ncrc. */
+			} else {
+				/* advance crc (including last response byte) */
+				crc = ncrc;
+			}
+
+			if ((cmd->flags & MMC_RSP_CRC) && (trail != (crc | 1))) {
+				/* crc error */
+				cmd->error = -EIO;
+				pr_debug(" found crc error: expect=%02X actual=%02X\n", crc | 1, trail);
+			}
+		}
+	}
+}
+
 static void ed64mmc_request(struct mmc_host *mmc, struct mmc_request *mrq)
 {
 	struct ed64mmc_host *host = mmc_priv(mmc);
@@ -357,56 +479,27 @@ static void ed64mmc_request(struct mmc_host *mmc, struct mmc_request *mrq)
 		panic("ed64sdmmc: data without response crc??");
 	}
 
-	/* 8bit command write */
-	ed64_spicfg(host, 0, !!data);
-
-	{
-		u8 opbyte = 0x40 | cmd->opcode;
-		u32 arg = cmd->arg;
-		int i, crc;
-
-		ed64_spiwrite(pi, 0xFF); /* dummy clock */
-
-		ed64_spiwrite(pi, opbyte);
-		crc = crc7_update(0, opbyte);
-
-		for (i = 0; i < 4; i++) {
-			int abyte = (arg >> 24) & 0xFF;
-			ed64_spiwrite(pi, abyte);
-			crc = crc7_update(crc, abyte);
-			arg <<= 8;
-		}
-
-//		dev_dbg(dev, "crc=%02X\n", crc | 1);
-		ed64_spiwrite(pi, crc | 1);
+	/* SetBlockCount if specified (TODO mrq->sbc->error handling) */
+	if (mrq->sbc) {
+		pr_debug("ed64mmc_request sbc opcode=%i arg=%08X spicfg=%02X\n", mrq->sbc->opcode, mrq->sbc->arg, host->spicfg);
+		ed64mmc_send_command(host, mrq->sbc, 0);
+		ed64mmc_recv_cmd(host, mrq->sbc);
 	}
 
+	/* send command */
+	ed64mmc_send_command(host, cmd, 0);
+
 	if (data) { /* read response buffer and transfer data (fast-path) for reading DAT (hard-time required) */
-		u32 bits = 0xFF; /* fill with all 1s is important */
+		int bits;
 		int i;
-		int try;
 
-		/* read response */
+		/* read first byte of response (to wait for command completion if ACMD13) */
 
-		/* 1bit command read */
-		ed64_spicfg(host, ED64_SPICFG_1BIT | ED64_SPICFG_RD, 1);
+		bits = ed64mmc_recv_cmd_start(host, 1);
 
-		/* seek for start-bit and transmission-bit */
-		for (try = CMD_TIMEOUT; try; try--) {
-//			u32 obits = bits;
-			bits = ed64_spiread(pi, bits/* previously received */); /* data magically shifts in from lsb */
-			if ((bits & 0xC0) == 0) {
-				/* found start-bit and transmission-bit! */
-//				dev_dbg(dev, "start-bit found: %08X->%08X\n", obits, bits);
-				/* convert into byte (strip out ED64 status in high halfword) to comparable with cmd->opcode */
-				bits &= 0xFF;
-				break;
-			}
-		}
+		//dev_dbg(dev, "w/data first cmd response byte; bits=%d\n", bits);
 
-		//dev_dbg(dev, "w/data first cmd response byte; try=%d\n", try);
-
-		if (try == 0) {
+		if (bits < 0) {
 			cmd->error = -ETIMEDOUT;
 		} else {
 			uint8_t cmdresp[5];
@@ -492,86 +585,19 @@ static void ed64mmc_request(struct mmc_host *mmc, struct mmc_request *mrq)
 		}
 	} else if ((cmd->flags & MMC_RSP_PRESENT) || (cmd->opcode == 0)) { /* read response buffer, or just clock when opcode==0 */
 		/* read response */
-		u32 bits = 0xFF; /* fill with all 1s is important */
-		int try;
-
-		/* 1bit command read */
-		ed64_spicfg(host, ED64_SPICFG_1BIT | ED64_SPICFG_RD, 0);
-
-		/* seek for start-bit and transmission-bit */
-		for (try = CMD_TIMEOUT; try; try--) {
-//			u32 obits = bits;
-			bits = ed64_spiread(pi, bits/* previously received */); /* data magically shifts in from lsb */
-			if ((bits & 0xC0) == 0) {
-				/* found start-bit and transmission-bit! */
-//				dev_dbg(dev, "start-bit found: %08X->%08X\n", obits, bits);
-				/* convert into byte (strip out ED64 status in high halfword) to comparable with cmd->opcode */
-				bits &= 0xFF;
-				break;
-			}
-		}
-
-		if (try == 0) {
-			if (cmd->opcode != 0) {
-				cmd->error = -ETIMEDOUT;
-			}
-		} else if ((cmd->flags & MMC_RSP_OPCODE) && (bits != cmd->opcode)) {
-			pr_debug("mis opcode echo: exp=%02X act=%02X\n", cmd->opcode, bits);
-			cmd->error = -EILSEQ;
-		}
-
-		pr_debug("expect response or cmd0; try=%d first_err=%d\n", try, cmd->error);
-
-		/* receive response and crc if not timed out (but incl. invalid opcode echo, excl. timeout with opcode==0) */
-		if (try != 0) {
-			int rwords = (cmd->flags & MMC_RSP_136) ? 4 : 1;
-			int i, j, crc = 0, ncrc = (cmd->flags & MMC_RSP_136) ? 0 : crc7_update(0, bits);
-
-			/* 8bit command read */
-			ed64_spicfg(host, ED64_SPICFG_RD, 0);
-
-			/* read response word(s) */
-			for (i = 0; i < rwords; i++) {
-				uint32_t word = 0;
-				for (j = 0; j < 4; j++) {
-					u32 rbyte;
-					rbyte	= ed64_spiread(pi, 0xFF/* something to clock */) & 0xFF;
-					word = (word << 8) | rbyte;
-					crc = ncrc;
-					ncrc = crc7_update(ncrc, rbyte);
-				}
-				cmd->resp[i] = word;
-			}
-
-			pr_debug(" response0=%08X\n", cmd->resp[0]);
-
-			/* read crc and test it if required */
-			{
-				int trail;
-
-				trail	= ed64_spiread(pi, 0xFF/* something to clock */) & 0xFF;
-
-				/* note: R3 runs this but useless. */
-				if (cmd->flags & MMC_RSP_136) {
-					trail = cmd->resp[3] & 0xFF;
-					/* note: crc must be kept as previous of ncrc. */
-				} else {
-					/* advance crc (including last response byte) */
-					crc = ncrc;
-				}
-
-				if ((cmd->flags & MMC_RSP_CRC) && (trail != (crc | 1))) {
-					/* crc error */
-					cmd->error = -EIO;
-					pr_debug(" found crc error: expect=%02X actual=%02X\n", crc | 1, trail);
-				}
-			}
-		}
+		ed64mmc_recv_cmd(host, cmd);
 	} else {
 		pr_debug("expect no response\n");
 	}
 
-	host->lastopcode = cmd->opcode;
+	/* stop command if specified (TODO mrq->stop->error handling) */
+	if (mrq->stop) {
+		pr_debug("ed64mmc_request stop opcode=%i arg=%08X spicfg=%02X\n", mrq->stop->opcode, mrq->stop->arg, host->spicfg);
+		ed64mmc_send_command(host, mrq->stop, 0);
+		ed64mmc_recv_cmd(host, mrq->stop);
+	}
+
+	host->lastopcode = cmd->opcode; /* for ACMD13's CMD55 detection */
 
 	n64pi_ed64_disable(pi);
 
