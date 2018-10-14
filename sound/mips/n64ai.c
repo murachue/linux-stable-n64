@@ -1,7 +1,38 @@
+/*
+ *   Sound driver for Nintendo 64 RCP AI (Audio Interface).
+ *
+ *   Copyright 2018 Murachue <murachue+github@gmail.com>
+ *
+ *   Derived from: sgio2audio.c
+ *    Copyright 2003 Vivien Chappelier <vivien.chappelier@linux-mips.org>
+ *    Copyright 2008 Thomas Bogendoerfer <tsbogend@alpha.franken.de>
+ *    Mxier part taken from mace_audio.c:
+ *    Copyright 2007 Thorben Jändling <tj.trevelyan@gmail.com>
+ *
+ *   This program is free software; you can redistribute it and/or modify
+ *   it under the terms of the GNU General Public License as published by
+ *   the Free Software Foundation; either version 2 of the License, or
+ *   (at your option) any later version.
+ *
+ *   This program is distributed in the hope that it will be useful,
+ *   but WITHOUT ANY WARRANTY; without even the implied warranty of
+ *   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ *   GNU General Public License for more details.
+ *
+ *   You should have received a copy of the GNU General Public License
+ *   along with this program; if not, write to the Free Software
+ *   Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307 USA
+ *
+ */
+
 #include <linux/module.h>
+#include <linux/spinlock.h>
+#include <linux/interrupt.h>
 #include <linux/platform_device.h>
+#include <linux/dma-mapping.h>
 #include <sound/core.h>
 #include <sound/pcm.h>
+#include <sound/initval.h>
 
 struct snd_n64ai {
 	spinlock_t lock;
@@ -47,8 +78,6 @@ static int snd_n64ai_playback_open(struct snd_pcm_substream *substream)
 
 static int snd_n64ai_playback_close(struct snd_pcm_substream *substream)
 {
-	struct snd_pcm_runtime *runtime = substream->runtime;
-
 	/* nothing to do... */
 
 	return 0;
@@ -82,8 +111,8 @@ static int snd_n64ai_pcm_prepare(struct snd_pcm_substream *substream)
 	case SNDRV_PCM_STREAM_PLAYBACK:
 		/* TODO support non-NTSC */
 		/* TODO should be round-off to nearest (4/5) before minus1? */
-		__raw_writel(48681812 / runtime->rate - 1, dev->reg_base + 0x10);
-		__raw_writel(16 - 1, dev->reg_base + 0x14); /* note: should be min(48M/rate/66, 16) - 1, but its >368KHz rate... */
+		__raw_writel(48681812 / runtime->rate - 1, chip->regbase + 0x10);
+		__raw_writel(16 - 1, chip->regbase + 0x14); /* note: should be min(48M/rate/66, 16) - 1, but its >368KHz rate... */
 		break;
 	default:
 		pr_warn("snd-n64ai: unknown stream type %d\n", substream->stream);
@@ -117,13 +146,13 @@ static int snd_n64ai_dma_at(struct snd_n64ai *chip, snd_pcm_uframes_t pos, snd_p
 {
 	void *vptr;
 	ssize_t size;
-	dmaaddr_t addr;
+	dma_addr_t addr;
 
 	/* unmap old if did */
 	snd_n64ai_may_unmap_dma(chip);
 
 	/* abort if already AI buffer is full */
-	if (__raw_readl(dev->reg_base + 0x0C) & 0x80000000) {
+	if (__raw_readl(chip->regbase + 0x0C) & 0x80000000) {
 		return -1;
 	}
 
@@ -136,7 +165,7 @@ static int snd_n64ai_dma_at(struct snd_n64ai *chip, snd_pcm_uframes_t pos, snd_p
 		struct snd_pcm_runtime *runtime = chip->substream->runtime;
 
 		/* map next (to be) */
-		vptr = runtime->dma_buffer_p->area + frames_to_bytes(pos);
+		vptr = runtime->dma_buffer_p->area + frames_to_bytes(runtime, pos);
 		size = frames_to_bytes(runtime, nframes);
 		addr = dma_map_single(chip->dev, vptr, size, DMA_TO_DEVICE);
 		if (dma_mapping_error(chip->dev, addr)) {
@@ -144,9 +173,9 @@ static int snd_n64ai_dma_at(struct snd_n64ai *chip, snd_pcm_uframes_t pos, snd_p
 		}
 
 		/* issue TODO memory-barrier? align test? */
-		__raw_writel(addr, dev->reg_base + 0x00);
-		__raw_writel(size, dev->reg_base + 0x04);
-		__raw_writel(1,    dev->reg_base + 0x08); /* only first required? */
+		__raw_writel(addr, chip->regbase + 0x00);
+		__raw_writel(size, chip->regbase + 0x04);
+		__raw_writel(1,    chip->regbase + 0x08); /* only first required? */
 
 		/* update dma infos */
 		chip->last_dma_vptr = vptr;
@@ -167,7 +196,7 @@ static int snd_n64ai_pcm_trigger(struct snd_pcm_substream *substream, int cmd)
 		return snd_n64ai_dma_at(chip, chip->pos, substream->runtime->period_size);
 	case SNDRV_PCM_TRIGGER_STOP:
 		/* stop the PCM engine */
-		__raw_writel(0, dev->reg_base + 0x08);
+		__raw_writel(0, chip->regbase + 0x08);
 		snd_n64ai_may_unmap_dma(chip);
 		return 0;
 	default:
@@ -240,14 +269,14 @@ static int snd_n64ai_probe(struct platform_device *pdev)
 	chip->regbase = devm_ioremap_resource(&pdev->dev, memres);
 	if (IS_ERR(chip->regbase)) {
 		snd_card_free(card);
-		return PTR_ERR(base);
+		return PTR_ERR(chip->regbase);
 	}
 
 	irq = platform_get_irq(pdev, 0);
-	ret = devm_request_irq(&pdev->dev, irq, snd_n64ai_isr, 0/*noshare*/, "n64ai", chip);
-	if (ret < 0) {
+	err = devm_request_irq(&pdev->dev, irq, snd_n64ai_isr, 0/*noshare*/, "n64ai", chip);
+	if (err < 0) {
 		snd_card_free(card);
-		return ret;
+		return err;
 	}
 
 	/* create the new pcm of the card */
@@ -265,7 +294,7 @@ static int snd_n64ai_probe(struct platform_device *pdev)
 	/* setup the card description after resources are acquired. */
 	strcpy(card->driver, "n64ai driver");
 	strcpy(card->shortname, "n64ai");
-	sprintf(card->longname, "Nintendo 64 AI regbase 0x%08X irq %i", chip->regbase, irq);
+	sprintf(card->longname, "Nintendo 64 AI regbase %p irq %i", chip->regbase, irq);
 
 	/* register the card!! */
 	err = snd_card_register(card);
@@ -301,3 +330,4 @@ module_platform_driver(n64ai_driver);
 
 MODULE_LICENSE("GPL");
 MODULE_DESCRIPTION("Nintendo 64 Audio Interface Driver");
+MODULE_AUTHOR("Murachue <murachue+github@gmail.com>");
