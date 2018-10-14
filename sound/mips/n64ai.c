@@ -228,6 +228,9 @@ static irqreturn_t snd_n64ai_isr(int irq, void *dev_id)
 	struct snd_n64ai *chip = dev_id;
 	struct snd_pcm_substream *substream = chip->substream;
 
+	/* clear interrupt */
+	__raw_writel(0, chip->regbase + 0x0C);
+
 	if (!substream || !substream->runtime || (chip->last_dma_nbytes == 0)) {
 		pr_err("n64ai: spurious interrupt");
 	} else {
