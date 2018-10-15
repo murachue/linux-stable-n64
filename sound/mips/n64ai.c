@@ -47,6 +47,9 @@ struct snd_n64ai {
 	dma_addr_t last_dma_addr;
 	void *last_dma_vptr;
 	ssize_t last_dma_nbytes;
+
+	int playing;
+	int stopping;
 };
 
 static struct snd_pcm_hardware snd_n64ai_pcm_hw = {
@@ -60,8 +63,8 @@ static struct snd_pcm_hardware snd_n64ai_pcm_hw = {
 	.rate_max =         48000,
 	.channels_min =     2,
 	.channels_max =     2,
-	.buffer_bytes_max = 65536,
-	.period_bytes_min = 256, /* period bytes must be multiply of 8 */
+	.buffer_bytes_max = 131072,
+	.period_bytes_min = 8, /* period bytes must be multiply of 8 */
 	.period_bytes_max = 65536,
 	.periods_min =      1, /* uh too short? */
 	.periods_max =      1024,
@@ -103,9 +106,12 @@ static int snd_n64ai_pcm_prepare(struct snd_pcm_substream *substream)
 
 	spin_lock_irqsave(&chip->lock, flags);
 
-	/* Setup the dma transfer pointers.  */
-	chip->pos = 0;
+	/* Setup the status.  */
 	chip->substream = substream;
+	chip->pos = 0;
+	chip->last_dma_nbytes = 0;
+	chip->playing = 0;
+	chip->stopping = 0;
 
 	switch (substream->stream) {
 	case SNDRV_PCM_STREAM_PLAYBACK:
@@ -142,7 +148,7 @@ static int snd_n64ai_may_unmap_dma(struct snd_n64ai *chip)
 	return 1;
 }
 
-static int snd_n64ai_dma_at(struct snd_n64ai *chip, snd_pcm_uframes_t pos, snd_pcm_uframes_t nframes)
+static int snd_n64ai_dma_at(struct snd_n64ai *chip, ssize_t pos, snd_pcm_uframes_t nframes)
 {
 	void *vptr;
 	ssize_t size;
@@ -165,7 +171,7 @@ static int snd_n64ai_dma_at(struct snd_n64ai *chip, snd_pcm_uframes_t pos, snd_p
 		struct snd_pcm_runtime *runtime = chip->substream->runtime;
 
 		/* map next (to be) */
-		vptr = runtime->dma_buffer_p->area + frames_to_bytes(runtime, pos);
+		vptr = runtime->dma_buffer_p->area + pos;
 		size = frames_to_bytes(runtime, nframes);
 		addr = dma_map_single(chip->dev, vptr, size, DMA_TO_DEVICE);
 		if (dma_mapping_error(chip->dev, addr)) {
@@ -189,19 +195,41 @@ static int snd_n64ai_dma_at(struct snd_n64ai *chip, snd_pcm_uframes_t pos, snd_p
 static int snd_n64ai_pcm_trigger(struct snd_pcm_substream *substream, int cmd)
 {
 	struct snd_n64ai *chip = snd_pcm_substream_chip(substream); /* or just substream->private_data ? */
+	unsigned long flags;
+	int ret;
+
+	spin_lock_irqsave(&chip->lock, flags);
 
 	switch (cmd) {
 	case SNDRV_PCM_TRIGGER_START:
 		/* start the PCM engine */
-		return snd_n64ai_dma_at(chip, chip->pos, substream->runtime->period_size);
+		if (!chip->playing) {
+			int r = snd_n64ai_dma_at(chip, chip->pos, substream->runtime->period_size);
+			if (r) {
+				pr_err("n64ai: pcm_trigger: dma_at failed err=%d\n", r);
+			} else {
+				chip->playing = 1;
+				chip->stopping = 0;
+			}
+			ret = r ? -EIO : 0;
+		}
+		break;
 	case SNDRV_PCM_TRIGGER_STOP:
 		/* stop the PCM engine */
-		__raw_writel(0, chip->regbase + 0x08);
-		snd_n64ai_may_unmap_dma(chip);
-		return 0;
+		__raw_writel(0, chip->regbase + 0x04); /* set length=0 to make the period currently playing is last. */
+		//snd_n64ai_may_unmap_dma(chip);
+		chip->playing = 0;
+		chip->stopping = 1;
+		ret = 0;
+		break;
 	default:
-		return -EINVAL;
+		ret = -EINVAL;
+		break;
 	}
+
+	spin_unlock_irqrestore(&chip->lock, flags);
+
+	return ret;
 }
 
 static snd_pcm_uframes_t snd_n64ai_pcm_pointer(struct snd_pcm_substream *substream)
@@ -223,23 +251,40 @@ static struct snd_pcm_ops snd_n64ai_playback_ops = {
 	.pointer =     snd_n64ai_pcm_pointer,
 };
 
+static void snd_n64ai_advance_pos(struct snd_n64ai *chip, struct snd_pcm_runtime *runtime)
+{
+	ssize_t buffer_nbytes = frames_to_bytes(runtime, runtime->buffer_size);
+	chip->pos = (chip->pos + chip->last_dma_nbytes) % buffer_nbytes;
+}
+
 static irqreturn_t snd_n64ai_isr(int irq, void *dev_id)
 {
 	struct snd_n64ai *chip = dev_id;
-	struct snd_pcm_substream *substream = chip->substream;
+	unsigned long flags;
 
-	/* clear interrupt */
-	__raw_writel(0, chip->regbase + 0x0C);
+	spin_lock_irqsave(&chip->lock, flags);
+	{
+		struct snd_pcm_substream *substream = chip->substream;
 
-	if (!substream || !substream->runtime || (chip->last_dma_nbytes == 0)) {
-		pr_err("n64ai: spurious interrupt");
-	} else {
-		struct snd_pcm_runtime *runtime = substream->runtime;
-		ssize_t buffer_nbytes = frames_to_bytes(runtime, runtime->buffer_size);
-		chip->pos = (chip->pos + chip->last_dma_nbytes) % buffer_nbytes;
-		snd_pcm_period_elapsed(substream);
-		snd_n64ai_dma_at(chip, chip->pos, runtime->period_size);
+		/* clear interrupt */
+		__raw_writel(0, chip->regbase + 0x0C);
+
+		if (chip->stopping) {
+			/* this is the last period. just ack. */
+			chip->stopping = 0;
+		} else if (!chip->playing || !substream || !substream->runtime || (chip->last_dma_nbytes == 0)) {
+			pr_err("n64ai: spurious interrupt\n");
+		} else {
+			struct snd_pcm_runtime *runtime = substream->runtime;
+			int r;
+			snd_pcm_period_elapsed(substream);
+			snd_n64ai_advance_pos(chip, runtime);
+			if ((r = snd_n64ai_dma_at(chip, chip->pos, runtime->period_size)) != 0) {
+				pr_err("n64ai: isr: dma_at failed err=%d\n", r);
+			}
+		}
 	}
+	spin_unlock_irqrestore(&chip->lock, flags);
 
 	return IRQ_HANDLED;
 }
@@ -292,7 +337,7 @@ static int snd_n64ai_probe(struct platform_device *pdev)
 	pcm->private_data = chip; /* note: can be reached by pcm->card->private_data, this is shortcut. also for substreams. */
 	strcpy(pcm->name, "N64AI PCM");
 	snd_pcm_set_ops(pcm, SNDRV_PCM_STREAM_PLAYBACK, &snd_n64ai_playback_ops);
-	snd_pcm_lib_preallocate_pages_for_all(pcm, SNDRV_DMA_TYPE_CONTINUOUS, snd_dma_continuous_data(GFP_KERNEL), 64 * 1024, 64 * 1024); /* use buffer_bytes_max? TODO align 8?? */
+	snd_pcm_lib_preallocate_pages_for_all(pcm, SNDRV_DMA_TYPE_CONTINUOUS, snd_dma_continuous_data(GFP_KERNEL), snd_n64ai_pcm_hw.buffer_bytes_max, snd_n64ai_pcm_hw.buffer_bytes_max); /* TODO align 8?? */
 
 	/* setup the card description after resources are acquired. */
 	strcpy(card->driver, "n64ai driver");
