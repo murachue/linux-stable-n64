@@ -250,7 +250,7 @@ static int snd_n64ai_enqueue_next(struct snd_n64ai *chip)
 				chip->nextnextpos = (chip->nextpos + nbytes) % bufnbytes;
 				chip->remain = remain;
 				chip->next_dma = (chip->next_dma + 1) % ARRAY_SIZE(chip->last_dmas);
-				chip->nextnext_complete_period = !!remain;
+				chip->nextnext_complete_period = !remain;
 			}
 			return r;
 		}
