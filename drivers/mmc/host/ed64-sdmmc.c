@@ -134,90 +134,115 @@ static void crc16_2dat4_update(int (*crcs)[4], int byte) {
 	}
 }
 
-/* TODO ED64 SPI DMA support */
 static int ed64mmc_block_read(struct ed64mmc_host *host, u8 *buf, int len)
 {
 	struct n64pi *pi = host->pi;
 	int onebit = (host->datwidth == 0);
-	int crcs[4] = {0};
-	int readcrcs[4] = {0};
-	int i, d;
+
+	if (!onebit && (len % 512 == 0)) {
+		/* DMA read */
+		int i;
+
+		/* 4lines-2bit data read */
+		ed64_spicfg(host, ED64_SPICFG_DAT | ED64_SPICFG_RD, 0);
+
+		for (i = 0; i < len / 512; i++) {
+			/* SD -> ED64 sdram */
+			n64pi_ed64_regwrite(pi, host->rombase/2048, ED64_REG_DMAADDR);
+			n64pi_ed64_regwrite(pi, (512 - 1)/512, ED64_REG_DMALEN); /* 1-512=>0, 513-2014=>1, ... */
+			n64pi_ed64_regwrite(pi, ED64_DMACFG_SD2RAM, ED64_REG_DMACFG);
+			{
+				uint32_t status;
+				while((status = n64pi_ed64_regread(pi, ED64_REG_STATUS)) & ED64_STATUS_DMABUSY) /*wait-while-dmabusy*/ ;
+				if (status & ED64_STATUS_DMATOUT) {
+					return -EIO;
+				}
+			}
+			/* ED64 sdram -> rdram */
+			n64pi_read_dma(pi, buf + i * 512, 0x10000000 + host->rombase, 512);
+		}
+	} else {
+		/* PIO read */
+		int crcs[4] = {0};
+		int readcrcs[4] = {0};
+		int i, d;
 int starttime;
 
-	/* 4lines-1bit data read */
-	ed64_spicfg(host, ED64_SPICFG_1BIT | ED64_SPICFG_DAT | ED64_SPICFG_RD, 0);
+		/* 4lines-1bit data read */
+		ed64_spicfg(host, ED64_SPICFG_1BIT | ED64_SPICFG_DAT | ED64_SPICFG_RD, 0);
 
-	/* seek for start bit */
-	for (i = TRANSFER_TIMEOUT; i; i--) {
-		/* if DAT0(0-3 as spec...) is low: it's start-bit! */
-		if ((ed64_spiread(pi, 0xFF/* previously received as 0x?F */) & 1) == 0) {
-			break;
+		/* seek for start bit */
+		for (i = TRANSFER_TIMEOUT; i; i--) {
+			/* if DAT0(0-3 as spec...) is low: it's start-bit! */
+			if ((ed64_spiread(pi, 0xFF/* previously received as 0x?F */) & 1) == 0) {
+				break;
+			}
 		}
-	}
-	if (i == 0) {
-		return -ETIMEDOUT;
-	}
+		if (i == 0) {
+			return -ETIMEDOUT;
+		}
 starttime=TRANSFER_TIMEOUT-i;
 
-	/* 4lines-2bit data read */
-	ed64_spicfg(host, ED64_SPICFG_DAT | ED64_SPICFG_RD, 0);
+		/* 4lines-2bit data read */
+		ed64_spicfg(host, ED64_SPICFG_DAT | ED64_SPICFG_RD, 0);
 
-	/* read data */
-	{
-		int cnt = len * (onebit ? 4 : 1); /* in 1bit mode, required 4 times. */
-		unsigned int bbuf = 0;
-		u8 *p = buf; /* FIXME DEBUG keep buf to dump on panic */
+		/* read data */
+		{
+			int cnt = len * (onebit ? 4 : 1); /* in 1bit mode, required 4 times. */
+			unsigned int bbuf = 0;
+			u8 *p = buf; /* FIXME DEBUG keep buf to dump on panic */
 
-		for (i = 0; i < cnt; i++) {
+			for (i = 0; i < cnt; i++) {
+				u32 byte;
+
+				byte = ed64_spiread(pi, 0xFF/* something to clock */);
+				if (onebit) {
+					bbuf <<= 2;
+					bbuf |= (((byte >> 4) & 1) << 1) | (byte & 1);
+					if (i % 4 == 3) {
+						*p++ = bbuf; /* write low 8bit */
+					}
+				} else {
+					*p++ = byte;
+				}
+				crc16_2dat4_update(&crcs, byte);
+			}
+		}
+
+		/* read DAT-individual crc16s (from ED64_REG_SPI perspective, seen as interleaved) */
+		for (i = 0; i < 8; i++) {
 			u32 byte;
+			int j;
 
 			byte = ed64_spiread(pi, 0xFF/* something to clock */);
-			if (onebit) {
-				bbuf <<= 2;
-				bbuf |= (((byte >> 4) & 1) << 1) | (byte & 1);
-				if (i % 4 == 3) {
-					*p++ = bbuf; /* write low 8bit */
+			for (j = 0; j < 2; j++) {
+				for (d = 3; d >= 0; d--) {
+					readcrcs[d] <<= 1;
+					readcrcs[d] |= (byte >> 7) & 1;
+					byte <<= 1;
 				}
+			}
+		}
+
+		/* TODO read end bit? */
+
+		/* verify crcs */
+		for (d = 0; d < (onebit ? 1 : 4); d++) {
+			if (crcs[d] == readcrcs[d]) {
+				continue;
+			}
+
+			/* pr_debug */
+			if (onebit) {
+				panic("ed64mmcbr: crc1 mismatch e=%04x a=%04x @%p st=%d\n", readcrcs[0], crcs[0], buf, starttime);
 			} else {
-				*p++ = byte;
+				panic("ed64mmcbr: crc4 mismatch e=%04x.%04x.%04x.%04x a=%04x.%04x.%04x.%04x\n",
+								 readcrcs[0], readcrcs[1], readcrcs[2], readcrcs[3],
+								 crcs[0], crcs[1], crcs[2], crcs[3]
+								);
 			}
-			crc16_2dat4_update(&crcs, byte);
+			return -EIO;
 		}
-	}
-
-	/* read DAT-individual crc16s (from ED64_REG_SPI perspective, seen as interleaved) */
-	for (i = 0; i < 8; i++) {
-		u32 byte;
-		int j;
-
-		byte = ed64_spiread(pi, 0xFF/* something to clock */);
-		for (j = 0; j < 2; j++) {
-			for (d = 3; d >= 0; d--) {
-				readcrcs[d] <<= 1;
-				readcrcs[d] |= (byte >> 7) & 1;
-				byte <<= 1;
-			}
-		}
-	}
-
-	/* TODO read end bit? */
-
-	/* verify crcs */
-	for (d = 0; d < (onebit ? 1 : 4); d++) {
-		if (crcs[d] == readcrcs[d]) {
-			continue;
-		}
-
-		/* pr_debug */
-		if (onebit) {
-			panic("ed64mmcbr: crc1 mismatch e=%04x a=%04x @%p st=%d\n", readcrcs[0], crcs[0], buf, starttime);
-		} else {
-			panic("ed64mmcbr: crc4 mismatch e=%04x.%04x.%04x.%04x a=%04x.%04x.%04x.%04x\n",
-							 readcrcs[0], readcrcs[1], readcrcs[2], readcrcs[3],
-							 crcs[0], crcs[1], crcs[2], crcs[3]
-							);
-		}
-		return -EIO;
 	}
 
 	return 0;
@@ -227,7 +252,7 @@ static int ed64mmc_block_write(struct ed64mmc_host *host, const u8 *buf, int len
 {
 	struct n64pi *pi = host->pi;
 	int crcs[4] = {0};
-	int i, j, d, resp;
+	int i, j, d;
 
 	/* TODO support 1-bit width */
 	if (host->datwidth == 0) {
@@ -668,6 +693,7 @@ static int ed64mmc_probe(struct platform_device *pdev)
 	 *      setting following value will cause oops->panic in account_*_time...
 	 *      invoked by destructing their memory by ed64mmc_block_read! (though I did write only in right area!?)
 	 *      indicator: mrq->cmd->data->sg->offset = 0x80 (if correct, it is 0)
+	 *      memo: default max_seg_size is 4KiB, following is smaller than that. is this root of crash??
 	mmc->max_seg_size = 4 * 512;
 	mmc->max_blk_size = 512;
 	*/
