@@ -172,8 +172,8 @@ static void n64si_close(struct input_dev *dev)
 	mutex_unlock(&si->mutex);
 }
 
-/* note: probe can be __init because of module_p_d"_probe". */
-static int __init n64si_probe(struct platform_device *pdev)
+/* note: probe can be __init when module_p_d"_probe" is used. */
+static int /*__init*/ n64si_probe(struct platform_device *pdev)
 {
 	struct n64si *si;
 	struct resource *res;
@@ -302,7 +302,7 @@ MODULE_DEVICE_TABLE(of, n64si_of_match);
 #endif
 
 static struct platform_driver n64si_driver = {
-	.probe = n64si_probe,
+	.probe = n64si_probe, /* note: this line will be removed if using m_p_d_probe. */
 	.remove = n64si_remove,
 	.driver = {
 		.name = "n64si",
@@ -310,9 +310,10 @@ static struct platform_driver n64si_driver = {
 	},
 };
 /* note: using module_p_d_probe because this n64si can be module and SI is not hot-pluggable
- * (instead of module_p_d(hotplug) or builtin_p_d*(non-modular).)
+ *       (instead of module_p_d(hotplug) or builtin_p_d*(non-modular).)
+ *       -> cancelled, it is postponed to when all n64* are using m_p_d_probe.
  */
-module_platform_driver_probe(n64si_driver, n64si_probe);
+module_platform_driver(n64si_driver);
 
 MODULE_AUTHOR("Murachue <murachue+github@gmail.com>");
 MODULE_DESCRIPTION("Driver for Nintendo 64 Controller Bros.");
