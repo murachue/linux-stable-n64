@@ -169,7 +169,7 @@ static int snd_n64ai_may_unmap_dma(struct snd_n64ai *chip, struct snd_n64ai_dma 
 		return -1;
 	}
 
-	pr_debug("n64ai: unmap_dma %p->%x+%x\n", dma->vptr, dma->addr, size);
+	pr_debug("n64ai: unmap_dma %p->%x+%d\n", dma->vptr, dma->addr, size);
 
 	/* unmap it and mark no-dma-mapped. */
 	dma_unmap_single(chip->dev, dma->addr, size, DMA_TO_DEVICE);
@@ -201,7 +201,7 @@ static int snd_n64ai_enqueue_raw(struct snd_n64ai *chip, struct snd_n64ai_dma *d
 		return -2;
 	}
 
-	pr_debug("n64ai: enqraw %p->%x+%x (%08x)\n", vptr, addr, nbytes, status);
+	pr_debug("n64ai: enqraw %p->%x+%d (%08x)\n", vptr, addr, nbytes, status);
 
 	/* issue TODO memory-barrier? align test? */
 	__raw_writel(addr, chip->regbase + 0x00);
@@ -379,7 +379,7 @@ static irqreturn_t snd_n64ai_isr(int irq, void *dev_id)
 				chip->stopping = 0;
 				/* paranoid: hw queue is empty, also sw should be so. */
 				if (chip->pos != chip->nextpos) {
-					pr_err("n64ai: sw/hw phase error %08X!=%08X\n", chip->pos, chip->nextpos);
+					pr_err("n64ai: sw/hw phase error %d!=%d\n", chip->pos, chip->nextpos);
 				}
 			}
 			snd_n64ai_may_unmap_dma(chip, &chip->last_dmas[chip->next_dma]);
