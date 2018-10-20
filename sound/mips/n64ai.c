@@ -36,6 +36,12 @@
 #include <sound/pcm.h>
 #include <sound/initval.h>
 
+struct snd_n64ai_dma {
+	dma_addr_t addr;
+	void *vptr; /* just for debug */
+	ssize_t nbytes;
+};
+
 struct snd_n64ai {
 	spinlock_t lock;
 	void __iomem *regbase;
@@ -44,11 +50,15 @@ struct snd_n64ai {
 
 	struct snd_pcm_substream *substream; /* points to the pcm playback substream. */
 	ssize_t pos; /* bytes offset currently playing (when playing) or to-be-played (when stopped) */
+	ssize_t remain; /* bytes, is larger than 0 if wrapping else 0 */
+	ssize_t nextpos;
+	ssize_t nextnextpos;
+	ssize_t next_complete_period;
+	ssize_t nextnext_complete_period;
 
 	/* runtime (embedded to chip because of only one instance: a playback) */
-	dma_addr_t last_dma_addr;
-	void *last_dma_vptr;
-	ssize_t last_dma_nbytes;
+	struct snd_n64ai_dma last_dmas[2];
+	int next_dma;
 
 	int playing;
 	int stopping;
@@ -118,10 +128,17 @@ static int snd_n64ai_pcm_prepare(struct snd_pcm_substream *substream)
 
 	/* Setup the status. TODO Assuming nothing is playing!! */
 	chip->substream = substream;
-	chip->pos = 0;
-	chip->last_dma_nbytes = 0;
+	chip->pos = 0; /* this must be zero. (without any sample completion, pos is zero.) */
+	chip->remain = 0; /* this must be zero. (first period is not bottom-half.) */
+	chip->nextpos = 0; /* this must be zero. (first irq is not complete first samples!) */
+	chip->nextnextpos = 0; /* will be overwritten by first SNDRV_PCM_TRIGGER_START */
+	chip->last_dmas[0].nbytes = 0; /* this must be zero. (no dma is mapped.) */
+	chip->last_dmas[1].nbytes = 0; /* this must be zero. (no dma is mapped.) */
 	chip->playing = 0;
 	chip->stopping = 0;
+	chip->next_dma = 0;
+	chip->next_complete_period = 0; /* this must be zero. (first irq is not complete first samples!) */
+	chip->nextnext_complete_period = 0; /* will be overwritten by first SNDRV_PCM_TRIGGER_START */
 
 	switch (substream->stream) {
 	case SNDRV_PCM_STREAM_PLAYBACK:
@@ -129,7 +146,6 @@ static int snd_n64ai_pcm_prepare(struct snd_pcm_substream *substream)
 		/* TODO should be round-off to nearest (4/5) before minus1? */
 		__raw_writel(48681812 / runtime->rate - 1, chip->regbase + 0x10);
 		__raw_writel(16 - 1, chip->regbase + 0x14); /* note: should be min(48M/rate/66, 16) - 1, but its >368KHz rate... */
-		__raw_writel(1, chip->regbase + 0x08); /* only first required? starting DMA without write addr/len cause nothing. */
 		break;
 	default:
 		pr_warn("snd-n64ai: unknown stream type %d\n", substream->stream);
@@ -141,74 +157,104 @@ static int snd_n64ai_pcm_prepare(struct snd_pcm_substream *substream)
 	return 0;
 }
 
-static int snd_n64ai_may_unmap_dma(struct snd_n64ai *chip)
+static int snd_n64ai_may_unmap_dma(struct snd_n64ai *chip, struct snd_n64ai_dma *dma)
 {
 	ssize_t size;
 
 	/* whether dma mapped is indicated by chip->last_dma_nbytes != 0 */
-	size = chip->last_dma_nbytes;
+	size = dma->nbytes;
 	if (size == 0) {
 		/* no dma area is mapped. do nothing. */
 		pr_debug("n64ai: unmap_dma nothing\n");
 		return -1;
 	}
 
-	pr_debug("n64ai: unmap_dma %p->%x+%x\n", chip->last_dma_vptr, chip->last_dma_addr, size);
+	pr_debug("n64ai: unmap_dma %p->%x+%x\n", dma->vptr, dma->addr, size);
 
 	/* unmap it and mark no-dma-mapped. */
-	dma_unmap_single(chip->dev, chip->last_dma_addr, size, DMA_TO_DEVICE);
-	chip->last_dma_nbytes = 0;
+	dma_unmap_single(chip->dev, dma->addr, size, DMA_TO_DEVICE);
+	dma->nbytes = 0;
 
 	return 0;
 }
 
-static int snd_n64ai_dma_at(struct snd_n64ai *chip, ssize_t pos, snd_pcm_uframes_t nframes)
+/* note: requires chip->lock is locked. */
+static int snd_n64ai_enqueue_raw(struct snd_n64ai *chip, struct snd_n64ai_dma *dma, void *vptr, ssize_t nbytes)
 {
 	uint32_t status;
-	void *vptr;
-	ssize_t size;
 	dma_addr_t addr;
-
-	/* unmap old if did */
-	snd_n64ai_may_unmap_dma(chip);
 
 	status = __raw_readl(chip->regbase + 0x0C);
 
 	/* abort if already AI buffer is full */
 	if (status & 0x80000000) {
-		pr_debug("n64ai: dma_at full (%08x)\n", status);
+		pr_debug("n64ai: enqraw full (%08x)\n", status);
 		return -1;
 	}
 
-	/* substream and its runtime must be exists */
-	if (!chip->substream || !chip->substream->runtime) {
+	/* unmap old if did */
+	snd_n64ai_may_unmap_dma(chip, dma);
+
+	/* map next (to be) */
+	addr = dma_map_single(chip->dev, vptr, nbytes, DMA_TO_DEVICE);
+	if (dma_mapping_error(chip->dev, addr)) {
 		return -2;
 	}
 
-	{
-		struct snd_pcm_runtime *runtime = chip->substream->runtime;
+	pr_debug("n64ai: enqraw %p->%x+%x (%08x)\n", vptr, addr, nbytes, status);
 
-		/* map next (to be) */
-		vptr = runtime->dma_buffer_p->area + pos;
-		size = frames_to_bytes(runtime, nframes);
-		addr = dma_map_single(chip->dev, vptr, size, DMA_TO_DEVICE);
-		if (dma_mapping_error(chip->dev, addr)) {
-			return -3;
-		}
+	/* issue TODO memory-barrier? align test? */
+	__raw_writel(addr, chip->regbase + 0x00);
+	__raw_writel(nbytes, chip->regbase + 0x04); /* note: not minus 1. */
 
-		pr_debug("n64ai: dma_at %p->%x+%x (%08x)\n", vptr, addr, size, status);
-
-		/* issue TODO memory-barrier? align test? */
-		__raw_writel(addr, chip->regbase + 0x00);
-		__raw_writel(size, chip->regbase + 0x04); /* note: not minus 1. */
-
-		/* update dma infos */
-		chip->last_dma_vptr = vptr;
-		chip->last_dma_nbytes = size;
-		chip->last_dma_addr = addr;
-	}
+	/* update dma infos */
+	dma->vptr = vptr; /* just for debug */
+	dma->nbytes = nbytes;
+	dma->addr = addr;
 
 	return 0;
+}
+
+/* note: requires chip->lock is locked. */
+static int snd_n64ai_enqueue_next(struct snd_n64ai *chip)
+{
+	/* substream and its runtime must be prepared */
+	if (!chip->substream || !chip->substream->runtime) {
+		return -3;
+	}
+
+	/* TODO ensure 8bytes-aligned ptr/size. */
+	{
+		struct snd_pcm_runtime *runtime = chip->substream->runtime;
+		const ssize_t bufnbytes = frames_to_bytes(runtime, runtime->buffer_size);
+		void *vptr = runtime->dma_buffer_p->area + chip->nextpos;
+		ssize_t nbytes;
+		ssize_t remain = 0;
+		if (chip->remain) {
+			/* enqueue bottom-half */
+			nbytes = chip->remain;
+		} else {
+			ssize_t bufrem = bufnbytes - chip->nextpos;
+			nbytes = frames_to_bytes(runtime, runtime->period_size);
+			if (bufrem < nbytes) {
+				/* overwrapping: enqueue top-half */
+				remain = nbytes - bufrem;
+				nbytes = bufrem;
+			} else {
+				/* non-overwrapping: do nothing. (nbytes=period_size, remain=0.) */
+			}
+		}
+		{
+			int r = snd_n64ai_enqueue_raw(chip, &chip->last_dmas[chip->next_dma], vptr, nbytes);
+			if (r == 0) {
+				chip->nextnextpos = (chip->nextpos + nbytes) % bufnbytes;
+				chip->remain = remain;
+				chip->next_dma = (chip->next_dma + 1) % ARRAY_SIZE(chip->last_dmas);
+				chip->nextnext_complete_period = !!remain;
+			}
+			return r;
+		}
+	}
 }
 
 static int snd_n64ai_pcm_trigger(struct snd_pcm_substream *substream, int cmd)
@@ -225,22 +271,34 @@ static int snd_n64ai_pcm_trigger(struct snd_pcm_substream *substream, int cmd)
 	case SNDRV_PCM_TRIGGER_START:
 		/* start the PCM engine */
 		if (!chip->playing) {
-			int r = snd_n64ai_dma_at(chip, chip->pos, substream->runtime->period_size);
-			if (r) {
-				pr_err("n64ai: pcm_trigger: dma_at failed err=%d\n", r);
-			} else {
-				chip->playing = 1; /* first enqueue */
-				chip->stopping = 0;
+			__raw_writel(1, chip->regbase + 0x08); /* Enable DMA. Starting DMA without write addr/len cause nothing. */
+			{
+				int r = snd_n64ai_enqueue_next(chip);
+				if (r) {
+					pr_err("n64ai: pcm_trigger: enq failed err=%d\n", r);
+				} else {
+					chip->playing = 1; /* first enqueue */
+					chip->stopping = 0;
+				}
+				ret = r ? -EIO : 0;
 			}
-			ret = r ? -EIO : 0;
 		}
 		break;
 	case SNDRV_PCM_TRIGGER_STOP:
 		/* stop the PCM engine */
-		//__raw_writel(0, chip->regbase + 0x04); /* set length=0 to make the period currently playing is last. */
-		//snd_n64ai_may_unmap_dma(chip);
+		__raw_writel(0, chip->regbase + 0x04); /* set length=0 to make the period currently playing is last. */
+		/* note: Disabling DMA is in irq handler. (to wait samples current playing, or it just pause and something is played at next DMA enable which is not intended.) */
+		chip->nextnextpos = chip->nextpos; /* nullify next pos update */
+		chip->nextnext_complete_period = 0; /* nullify next period completion */
+		/* unmap last dma area */
+		{
+			int last_dma_index = (chip->next_dma + (ARRAY_SIZE(chip->last_dmas) - 1)) % ARRAY_SIZE(chip->last_dmas);
+			snd_n64ai_may_unmap_dma(chip, &chip->last_dmas[last_dma_index]);
+		}
+
 		chip->playing = 0;
 		chip->stopping = 1;
+
 		ret = 0;
 		break;
 	default:
@@ -272,12 +330,6 @@ static struct snd_pcm_ops snd_n64ai_playback_ops = {
 	.pointer =     snd_n64ai_pcm_pointer,
 };
 
-static void snd_n64ai_advance_pos(struct snd_n64ai *chip, struct snd_pcm_runtime *runtime)
-{
-	ssize_t buffer_nbytes = frames_to_bytes(runtime, runtime->buffer_size);
-	chip->pos = (chip->pos + chip->last_dma_nbytes) % buffer_nbytes;
-}
-
 static irqreturn_t snd_n64ai_isr(int irq, void *dev_id)
 {
 	struct snd_n64ai *chip = dev_id;
@@ -291,6 +343,17 @@ static irqreturn_t snd_n64ai_isr(int irq, void *dev_id)
 		/* clear interrupt */
 		__raw_writel(0, chip->regbase + 0x0C);
 		status = __raw_readl(chip->regbase + 0x0C);
+
+		/* advance the pos. it seems this must be before snd_pcm_period_elapsed? */
+		chip->pos = chip->nextpos;
+		chip->nextpos = chip->nextnextpos;
+
+		/* period_elapsed if really so. (call without runtime is OK) */
+		if (chip->next_complete_period) {
+			snd_pcm_period_elapsed(substream);
+		}
+		/* and advance. */
+		chip->next_complete_period = chip->nextnext_complete_period;
 
 		if (chip->stopping) {
 			/* this is the last period. just ack. */
@@ -310,41 +373,30 @@ static irqreturn_t snd_n64ai_isr(int irq, void *dev_id)
 					pr_debug("required %d loops\n", i);
 				}
 			} else {
-				pr_debug("n64ai: isr stops %08X", status);
-				__raw_writel(0, chip->regbase + 0x08); /* DMA should be empty. stop the DMA. */
-				pr_debug("->%08X\n", __raw_readl(chip->regbase + 0x0C));
+				/* AI is not busy. */
+				__raw_writel(0, chip->regbase + 0x08); /* hw queue is empty. safe to disable the DMA. */
+				pr_debug("n64ai: isr stops %08X->%08X\n", status, __raw_readl(chip->regbase + 0x0C));
 				chip->stopping = 0;
+				/* paranoid: hw queue is empty, also sw should be so. */
+				if (chip->pos != chip->nextpos) {
+					pr_err("n64ai: sw/hw phase error %08X!=%08X\n", chip->pos, chip->nextpos);
+				}
 			}
-			if (substream && substream->runtime) {
-				/* speaker-test invokes here with substream->runtime == NULL?? TODO this is not required because of STOP? */
-				snd_n64ai_advance_pos(chip, substream->runtime); /* this must be before snd_n64ai_may_unmap_dma. */
-			}
-			snd_n64ai_may_unmap_dma(chip);
-		} else if (!chip->playing || !substream || !substream->runtime || (chip->last_dma_nbytes == 0)) {
+			snd_n64ai_may_unmap_dma(chip, &chip->last_dmas[chip->next_dma]);
+			chip->next_dma = (chip->next_dma + 1) % ARRAY_SIZE(chip->last_dmas);
+		} else if (!chip->playing || !substream || !substream->runtime) {
 			pr_err("n64ai: spurious interrupt %08X\n", status);
 		} else {
-			struct snd_pcm_runtime *runtime = substream->runtime;
-			int r;
 			if (chip->playing) { /* snd_pcm_period_elapsed may stop substream...!! verify playing now here */
-				switch (chip->playing) {
-				case 1:
-					pr_debug("n64ai: isr enqueued %08X\n", status);
-					__raw_writel(0, chip->regbase + 0x04); /* enqueue zero to cause next irq on finish current samples. */
-					chip->playing = 2;
-					break;
-				case 2:
-					pr_debug("n64ai: isr played %08X\n", status);
-					snd_n64ai_advance_pos(chip, runtime); /* this must be before snd_pcm_period_elapsed. */
-					snd_pcm_period_elapsed(substream);
-					if ((r = snd_n64ai_dma_at(chip, chip->pos, runtime->period_size)) != 0) {
-						pr_err("n64ai: isr: dma_at failed err=%d\n", r);
+				pr_debug("n64ai: isr playing %08X pos=%d\n", status, chip->pos);
+				{
+					int r;
+					if ((r = snd_n64ai_enqueue_next(chip)) != 0) {
+						pr_err("n64ai: isr: enq failed err=%d\n", r);
 					}
-					chip->playing = 1;
-					break;
-				default:
-					pr_err("n64ai: isr: phase error playing=%d\n", chip->playing);
-					break;
 				}
+			} else {
+				pr_debug("n64ai: isr play-cancelled %08X\n", status);
 			}
 		}
 	}
