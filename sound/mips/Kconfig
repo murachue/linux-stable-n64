@@ -38,6 +38,7 @@ config SND_AU1X00
 config SND_NINTENDO64_AI
 	tristate "Nintendo 64 AI"
 	depends on NINTENDO64
+	select SND_PCM
 	help
 	  Sound support for the Nintendo 64 AI(Audio Interface).
 	  This only supports PCM playing, not ADPCM etc.
