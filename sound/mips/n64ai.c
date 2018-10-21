@@ -36,12 +36,12 @@
 #include <sound/pcm.h>
 #include <sound/initval.h>
 
-struct snd_n64ai_dma {
+struct n64ai_dma {
 	dma_addr_t addr;
 	ssize_t nbytes;
 };
 
-struct snd_n64ai {
+struct n64ai {
 	spinlock_t lock;
 	void __iomem *regbase;
 	struct snd_card *card;
@@ -56,14 +56,14 @@ struct snd_n64ai {
 	ssize_t nextnext_complete_period;
 
 	/* runtime (embedded to chip because of only one instance: a playback) */
-	struct snd_n64ai_dma last_dmas[2];
+	struct n64ai_dma last_dmas[2];
 	int next_dma;
 
 	int playing;
 	int stopping;
 };
 
-static struct snd_pcm_hardware snd_n64ai_pcm_hw = {
+static struct snd_pcm_hardware n64ai_pcm_hw = {
 	.info = (SNDRV_PCM_INFO_MMAP |
 	         SNDRV_PCM_INFO_MMAP_VALID |
 	         SNDRV_PCM_INFO_INTERLEAVED |
@@ -81,18 +81,18 @@ static struct snd_pcm_hardware snd_n64ai_pcm_hw = {
 	.periods_max =      1024,
 };
 
-static int snd_n64ai_playback_open(struct snd_pcm_substream *substream)
+static int n64ai_playback_open(struct snd_pcm_substream *substream)
 {
 	struct snd_pcm_runtime *runtime = substream->runtime;
 
-	runtime->hw = snd_n64ai_pcm_hw;
+	runtime->hw = n64ai_pcm_hw;
 
 	pr_debug("n64ai: playback_open\n");
 
 	return 0;
 }
 
-static int snd_n64ai_playback_close(struct snd_pcm_substream *substream)
+static int n64ai_playback_close(struct snd_pcm_substream *substream)
 {
 	/* nothing to do... */
 
@@ -101,24 +101,24 @@ static int snd_n64ai_playback_close(struct snd_pcm_substream *substream)
 	return 0;
 }
 
-static int snd_n64ai_pcm_hw_params(struct snd_pcm_substream *substream, struct snd_pcm_hw_params *hw_params)
+static int n64ai_pcm_hw_params(struct snd_pcm_substream *substream, struct snd_pcm_hw_params *hw_params)
 {
 	pr_debug("n64ai: pcm_hw_params\n");
-	/* it will reuse preallocated dma buffer at snd_n64ai_probe, or allocate here if it is too short. */
+	/* it will reuse preallocated dma buffer at n64ai_probe, or allocate here if it is too short. */
 	return snd_pcm_lib_malloc_pages(substream, params_buffer_bytes(hw_params));
 }
 
-static int snd_n64ai_pcm_hw_free(struct snd_pcm_substream *substream)
+static int n64ai_pcm_hw_free(struct snd_pcm_substream *substream)
 {
 	pr_debug("n64ai: pcm_hw_free\n");
-	/* it will NOT free preallocated, or it DOES free if allocated at snd_n64ai_pcm_hw_params. */
+	/* it will NOT free preallocated, or it DOES free if allocated at n64ai_pcm_hw_params. */
 	return snd_pcm_lib_free_pages(substream);
 }
 
-static int snd_n64ai_pcm_prepare(struct snd_pcm_substream *substream)
+static int n64ai_pcm_prepare(struct snd_pcm_substream *substream)
 {
 	struct snd_pcm_runtime *runtime = substream->runtime;
-	struct snd_n64ai *chip = snd_pcm_substream_chip(substream); /* or just substream->private_data ? */
+	struct n64ai *chip = snd_pcm_substream_chip(substream); /* or just substream->private_data ? */
 	unsigned long flags;
 
 	spin_lock_irqsave(&chip->lock, flags);
@@ -156,7 +156,7 @@ static int snd_n64ai_pcm_prepare(struct snd_pcm_substream *substream)
 	return 0;
 }
 
-static int snd_n64ai_may_unmap_dma(struct snd_n64ai *chip, struct snd_n64ai_dma *dma)
+static int n64ai_may_unmap_dma(struct n64ai *chip, struct n64ai_dma *dma)
 {
 	ssize_t size;
 
@@ -178,7 +178,7 @@ static int snd_n64ai_may_unmap_dma(struct snd_n64ai *chip, struct snd_n64ai_dma 
 }
 
 /* note: requires chip->lock is locked. */
-static int snd_n64ai_enqueue_raw(struct snd_n64ai *chip, struct snd_n64ai_dma *dma, void *vptr, ssize_t nbytes)
+static int n64ai_enqueue_raw(struct n64ai *chip, struct n64ai_dma *dma, void *vptr, ssize_t nbytes)
 {
 	uint32_t status;
 	dma_addr_t addr;
@@ -192,7 +192,7 @@ static int snd_n64ai_enqueue_raw(struct snd_n64ai *chip, struct snd_n64ai_dma *d
 	}
 
 	/* unmap old if did */
-	snd_n64ai_may_unmap_dma(chip, dma);
+	n64ai_may_unmap_dma(chip, dma);
 
 	/* map next (to be) */
 	addr = dma_map_single(chip->dev, vptr, nbytes, DMA_TO_DEVICE);
@@ -214,7 +214,7 @@ static int snd_n64ai_enqueue_raw(struct snd_n64ai *chip, struct snd_n64ai_dma *d
 }
 
 /* note: requires chip->lock is locked. */
-static int snd_n64ai_enqueue_next(struct snd_n64ai *chip)
+static int n64ai_enqueue_next(struct n64ai *chip)
 {
 	/* substream and its runtime must be prepared */
 	if (!chip->substream || !chip->substream->runtime) {
@@ -243,7 +243,7 @@ static int snd_n64ai_enqueue_next(struct snd_n64ai *chip)
 			}
 		}
 		{
-			int r = snd_n64ai_enqueue_raw(chip, &chip->last_dmas[chip->next_dma], vptr, nbytes);
+			int r = n64ai_enqueue_raw(chip, &chip->last_dmas[chip->next_dma], vptr, nbytes);
 			if (r == 0) {
 				chip->nextnextpos = (chip->nextpos + nbytes) % bufnbytes;
 				chip->remain = remain;
@@ -255,9 +255,9 @@ static int snd_n64ai_enqueue_next(struct snd_n64ai *chip)
 	}
 }
 
-static int snd_n64ai_pcm_trigger(struct snd_pcm_substream *substream, int cmd)
+static int n64ai_pcm_trigger(struct snd_pcm_substream *substream, int cmd)
 {
-	struct snd_n64ai *chip = snd_pcm_substream_chip(substream); /* or just substream->private_data ? */
+	struct n64ai *chip = snd_pcm_substream_chip(substream); /* or just substream->private_data ? */
 	unsigned long flags;
 	int ret;
 
@@ -271,7 +271,7 @@ static int snd_n64ai_pcm_trigger(struct snd_pcm_substream *substream, int cmd)
 		if (!chip->playing) {
 			__raw_writel(1, chip->regbase + 0x08); /* Enable DMA. Starting DMA without write addr/len cause nothing. */
 			{
-				int r = snd_n64ai_enqueue_next(chip);
+				int r = n64ai_enqueue_next(chip);
 				if (r) {
 					pr_err("n64ai: pcm_trigger: enq failed err=%d\n", r);
 				} else {
@@ -291,7 +291,7 @@ static int snd_n64ai_pcm_trigger(struct snd_pcm_substream *substream, int cmd)
 		/* unmap last dma area */
 		{
 			int last_dma_index = (chip->next_dma + (ARRAY_SIZE(chip->last_dmas) - 1)) % ARRAY_SIZE(chip->last_dmas);
-			snd_n64ai_may_unmap_dma(chip, &chip->last_dmas[last_dma_index]);
+			n64ai_may_unmap_dma(chip, &chip->last_dmas[last_dma_index]);
 		}
 
 		chip->playing = 0;
@@ -309,28 +309,28 @@ static int snd_n64ai_pcm_trigger(struct snd_pcm_substream *substream, int cmd)
 	return ret;
 }
 
-static snd_pcm_uframes_t snd_n64ai_pcm_pointer(struct snd_pcm_substream *substream)
+static snd_pcm_uframes_t n64ai_pcm_pointer(struct snd_pcm_substream *substream)
 {
-	struct snd_n64ai *chip = snd_pcm_substream_chip(substream); /* or just substream->private_data ? */
+	struct n64ai *chip = snd_pcm_substream_chip(substream); /* or just substream->private_data ? */
 
 	/* current hardware pointer is not available on Nintendo 64 AI... software fallback. */
 	return bytes_to_frames(substream->runtime, chip->pos);
 }
 
-static struct snd_pcm_ops snd_n64ai_playback_ops = {
-	.open      = snd_n64ai_playback_open,
-	.close     = snd_n64ai_playback_close,
+static struct snd_pcm_ops n64ai_playback_ops = {
+	.open      = n64ai_playback_open,
+	.close     = n64ai_playback_close,
 	.ioctl     = snd_pcm_lib_ioctl,
-	.hw_params = snd_n64ai_pcm_hw_params,
-	.hw_free   = snd_n64ai_pcm_hw_free,
-	.prepare   = snd_n64ai_pcm_prepare,
-	.trigger   = snd_n64ai_pcm_trigger,
-	.pointer   = snd_n64ai_pcm_pointer,
+	.hw_params = n64ai_pcm_hw_params,
+	.hw_free   = n64ai_pcm_hw_free,
+	.prepare   = n64ai_pcm_prepare,
+	.trigger   = n64ai_pcm_trigger,
+	.pointer   = n64ai_pcm_pointer,
 };
 
-static irqreturn_t snd_n64ai_isr(int irq, void *dev_id)
+static irqreturn_t n64ai_isr(int irq, void *dev_id)
 {
-	struct snd_n64ai *chip = dev_id;
+	struct n64ai *chip = dev_id;
 	unsigned long flags;
 
 	spin_lock_irqsave(&chip->lock, flags);
@@ -380,7 +380,7 @@ static irqreturn_t snd_n64ai_isr(int irq, void *dev_id)
 					pr_err("n64ai: sw/hw phase error %d!=%d\n", chip->pos, chip->nextpos);
 				}
 			}
-			snd_n64ai_may_unmap_dma(chip, &chip->last_dmas[chip->next_dma]);
+			n64ai_may_unmap_dma(chip, &chip->last_dmas[chip->next_dma]);
 			chip->next_dma = (chip->next_dma + 1) % ARRAY_SIZE(chip->last_dmas);
 		} else if (!chip->playing || !substream || !substream->runtime) {
 			pr_err("n64ai: spurious interrupt %08X\n", status);
@@ -389,7 +389,7 @@ static irqreturn_t snd_n64ai_isr(int irq, void *dev_id)
 				pr_debug("n64ai: isr playing %08X pos=%d\n", status, chip->pos);
 				{
 					int r;
-					if ((r = snd_n64ai_enqueue_next(chip)) != 0) {
+					if ((r = n64ai_enqueue_next(chip)) != 0) {
 						pr_err("n64ai: isr: enq failed err=%d\n", r);
 					}
 				}
@@ -403,17 +403,17 @@ static irqreturn_t snd_n64ai_isr(int irq, void *dev_id)
 	return IRQ_HANDLED;
 }
 
-static int snd_n64ai_probe(struct platform_device *pdev)
+static int n64ai_probe(struct platform_device *pdev)
 {
 	struct resource *memres;
 	struct snd_card *card;
 	struct snd_pcm *pcm;
-	struct snd_n64ai *chip;
+	struct n64ai *chip;
 	int irq;
 	int err;
 
 	/* create the card */
-	err = snd_card_new(&pdev->dev, SNDRV_DEFAULT_IDX1, SNDRV_DEFAULT_STR1, THIS_MODULE, sizeof(struct snd_n64ai), &card);
+	err = snd_card_new(&pdev->dev, SNDRV_DEFAULT_IDX1, SNDRV_DEFAULT_STR1, THIS_MODULE, sizeof(struct n64ai), &card);
 	if (err < 0) {
 		return err;
 	}
@@ -435,7 +435,7 @@ static int snd_n64ai_probe(struct platform_device *pdev)
 	}
 
 	irq = platform_get_irq(pdev, 0);
-	err = devm_request_irq(&pdev->dev, irq, snd_n64ai_isr, 0/*noshare*/, "n64ai", chip);
+	err = devm_request_irq(&pdev->dev, irq, n64ai_isr, 0/*noshare*/, "n64ai", chip);
 	if (err < 0) {
 		snd_card_free(card);
 		return err;
@@ -450,8 +450,8 @@ static int snd_n64ai_probe(struct platform_device *pdev)
 
 	pcm->private_data = chip; /* note: can be reached by pcm->card->private_data, this is shortcut. also for substreams. */
 	strcpy(pcm->name, "N64AI PCM");
-	snd_pcm_set_ops(pcm, SNDRV_PCM_STREAM_PLAYBACK, &snd_n64ai_playback_ops);
-	snd_pcm_lib_preallocate_pages_for_all(pcm, SNDRV_DMA_TYPE_CONTINUOUS, snd_dma_continuous_data(GFP_KERNEL), snd_n64ai_pcm_hw.buffer_bytes_max, snd_n64ai_pcm_hw.buffer_bytes_max); /* TODO align 8?? */
+	snd_pcm_set_ops(pcm, SNDRV_PCM_STREAM_PLAYBACK, &n64ai_playback_ops);
+	snd_pcm_lib_preallocate_pages_for_all(pcm, SNDRV_DMA_TYPE_CONTINUOUS, snd_dma_continuous_data(GFP_KERNEL), n64ai_pcm_hw.buffer_bytes_max, n64ai_pcm_hw.buffer_bytes_max); /* TODO align 8?? */
 
 	/* setup the card description after resources are acquired. */
 	strcpy(card->driver, "n64ai driver");
@@ -471,7 +471,7 @@ static int snd_n64ai_probe(struct platform_device *pdev)
 	return 0;
 }
 
-static int snd_n64ai_remove(struct platform_device *pdev)
+static int n64ai_remove(struct platform_device *pdev)
 {
 	struct snd_card *card = platform_get_drvdata(pdev);
 
@@ -481,8 +481,8 @@ static int snd_n64ai_remove(struct platform_device *pdev)
 }
 
 static struct platform_driver n64ai_driver = {
-	.probe	= snd_n64ai_probe,
-	.remove	= snd_n64ai_remove,
+	.probe	= n64ai_probe,
+	.remove	= n64ai_remove,
 	.driver = {
 		.name	= "n64ai",
 	}
