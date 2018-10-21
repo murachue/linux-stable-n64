@@ -38,7 +38,6 @@
 
 struct snd_n64ai_dma {
 	dma_addr_t addr;
-	void *vptr; /* just for debug */
 	ssize_t nbytes;
 };
 
@@ -169,7 +168,7 @@ static int snd_n64ai_may_unmap_dma(struct snd_n64ai *chip, struct snd_n64ai_dma 
 		return -1;
 	}
 
-	pr_debug("n64ai: unmap_dma %p->%x+%d\n", dma->vptr, dma->addr, size);
+	pr_debug("n64ai: unmap_dma %x+%d\n", dma->addr, size);
 
 	/* unmap it and mark no-dma-mapped. */
 	dma_unmap_single(chip->dev, dma->addr, size, DMA_TO_DEVICE);
@@ -208,7 +207,6 @@ static int snd_n64ai_enqueue_raw(struct snd_n64ai *chip, struct snd_n64ai_dma *d
 	__raw_writel(nbytes, chip->regbase + 0x04); /* note: not minus 1. */
 
 	/* update dma infos */
-	dma->vptr = vptr; /* just for debug */
 	dma->nbytes = nbytes;
 	dma->addr = addr;
 
