@@ -51,7 +51,7 @@ struct ed64_private {
 	struct n64pi *pi; // n64pi arbitrator bound to the parent mfd device
 	uint32_t rombase; // ROM area that is used for rx/tx (2048 bytes align required by ED64 DMA!)
 	uint32_t status; // last polled status
-	unsigned char __attribute((aligned(8))) xmitbuf[256]; // 255+1-bytes DMA buffer, NOTE: must be 8 bytes aligned (required by PI DMA)
+	unsigned char __attribute((aligned(8))) xmitbuf[256*4]; // 255+1-bytes DMA buffer, NOTE: must be 8 bytes aligned (required by PI DMA)
 	long mute; // holds mute state, that is activated on usb-dma-timedout.
 };
 
@@ -160,46 +160,49 @@ static int ed64_tx(struct uart_port *port, int emit_error)
 		return 0;
 	}
 
-	/* ram(ed64->xmitbuf) -> cart */
-	// TODO variable length for shorter DMA time? but it is small enough...
-	if (n64pi_write_dma(pi, 0x10000000 + ed64->rombase, ed64->xmitbuf, 256) != N64PI_ERROR_SUCCESS) {
-		if (emit_error) {
-			pr_err("%s: DMA transfer error\n", __func__);
+	while(ed64->xmitbuf[0]) {
+		/* ram(ed64->xmitbuf) -> cart */
+		// TODO variable length for shorter DMA time? but it is small enough...
+		if (n64pi_write_dma(pi, 0x10000000 + ed64->rombase, ed64->xmitbuf, 256) != N64PI_ERROR_SUCCESS) {
+			if (emit_error) {
+				pr_err("%s: DMA transfer error\n", __func__);
+			}
+			goto err;
 		}
-		goto err;
-	}
 
-	if ((ed64->status = n64pi_ed64_regread(pi, 0x04)) & 1) {
-		/* ED64 DMA is running!? */
-		if (emit_error) {
-			pr_warn("%s: ED64 DMA is already running that is unexpected... waiting for that.\n", __func__);
+		if ((ed64->status = n64pi_ed64_regread(pi, 0x04)) & 1) {
+			/* ED64 DMA is running!? */
+			if (emit_error) {
+				pr_warn("%s: ED64 DMA is already running that is unexpected... waiting for that.\n", __func__);
+			}
+			while ((ed64->status = n64pi_ed64_regread(pi, 0x04)) & 1) {
+				/* ED64 DMA is running */
+			}
+		}
+
+		/* cart -> USB */
+		if (n64pi_ed64_regwrite(pi, 512/512 - 1, 0x08) != N64PI_ERROR_SUCCESS) { // dmalen in 512bytes - 1
+			goto err;
+		}
+		if (n64pi_ed64_regwrite(pi, ed64->rombase / 2048, 0x0c) != N64PI_ERROR_SUCCESS) { // dmaaddr in 2048bytes
+			goto err;
+		}
+		if (n64pi_ed64_regwrite(pi, 4, 0x14) != N64PI_ERROR_SUCCESS) { // dmacfg = 4(ram2fifo)
+			goto err;
 		}
 		while ((ed64->status = n64pi_ed64_regread(pi, 0x04)) & 1) {
 			/* ED64 DMA is running */
 		}
-	}
 
-	/* cart -> USB */
-	if (n64pi_ed64_regwrite(pi, 512/512 - 1, 0x08) != N64PI_ERROR_SUCCESS) { // dmalen in 512bytes - 1
-		goto err;
-	}
-	if (n64pi_ed64_regwrite(pi, ed64->rombase / 2048, 0x0c) != N64PI_ERROR_SUCCESS) { // dmaaddr in 2048bytes
-		goto err;
-	}
-	if (n64pi_ed64_regwrite(pi, 4, 0x14) != N64PI_ERROR_SUCCESS) { // dmacfg = 4(ram2fifo)
-		goto err;
-	}
-	while ((ed64->status = n64pi_ed64_regread(pi, 0x04)) & 1) {
-		/* ED64 DMA is running */
-	}
-
-	if (ed64->status & 2) {
-		/* tx timed out: mute to quick run on standalone. */
-		ed64->mute = 1;
-		/* mute then notice. */
-		pr_warn("%s: ED64 DMA timed out; muting!", __func__);
-	} else {
-		ed64->xmitbuf[0] = 0; /* clear buffer */
+		if (ed64->status & 2) {
+			/* tx timed out: mute to quick run on standalone. */
+			ed64->mute = 1;
+			pr_warn("%s: ED64 DMA timed out; muting!", __func__);
+			break;
+		} else {
+			memmove(ed64->xmitbuf, ed64->xmitbuf + 256, 256 * 3); /* move overflow buffer */
+			ed64->xmitbuf[256 * 3] = 0; /* clear overflow buffer */
+		}
 	}
 
 	return 0;
@@ -243,25 +246,27 @@ static void ed64_write(struct uart_port *port)
 
 	{
 		struct ed64_private *ed64 = (struct ed64_private *)port->private_data;
+		unsigned int count = uart_circ_chars_pending(xmit);
+		int b;
 
 		// prepare xmitbuf
 		// TODO don't buffer anything if xmitbuf is not empty, because console is buffering and it cannot be delayed,
 		//      though tty can.
-		{
-			unsigned int off = ed64->xmitbuf[0];
-			unsigned int avail = port->fifosize - off;
-			unsigned int _count = uart_circ_chars_pending(xmit);
-			unsigned int count = (_count < avail) ? _count : avail; // min(count, avail)
-			unsigned char *pbuf = ed64->xmitbuf + 1 + off;
+		for(b = 0; b < 4; b++) {
+			unsigned int off = ed64->xmitbuf[256 * b];
+			unsigned int avail = 255 - off;
+			unsigned int len = (count < avail) ? count : avail; // min(count, avail)
+			unsigned char *pbuf = ed64->xmitbuf + 256 * b + 1 + off;
 			unsigned int i;
 
-			ed64->xmitbuf[0] = off + count;
+			ed64->xmitbuf[256 * b] = off + len;
 			// TODO 1 or 2(wrapped) memcpy?
-			for(i = 0; i < count; i++) {
+			for(i = 0; i < len; i++) {
 				*pbuf++ = (unsigned char)xmit->buf[xmit->tail];
 				xmit->tail = (xmit->tail + 1) & (UART_XMIT_SIZE - 1);
 			}
-			port->icount.tx += count;
+			count -= len;
+			port->icount.tx += len;
 		}
 
 		if (ed64_tx(port, 1) != 0) {
@@ -754,13 +759,18 @@ static void ed64_console_write(struct console *co, const char *buf, unsigned cou
 	// TODO spinlock_irq port.lock
 	struct ed64_private *ed64 = port.private_data;
 	struct n64pi * const pi = ed64->pi;
+	int i;
 
 	/* enqueue message even when muted, to be outputed when un-muted. */
-	unsigned pos = ed64->xmitbuf[0];
-	unsigned avail = 255 - pos;
-	unsigned len = (avail < count) ? avail : count; // min(avail, count)
-	ed64->xmitbuf[0] += len;
-	memcpy(ed64->xmitbuf + 1 + pos, buf, len);
+	for(i = 0; i < 4; i++) {
+		unsigned pos = ed64->xmitbuf[256 * i];
+		unsigned avail = 255 - pos;
+		unsigned len = (avail < count) ? avail : count; // min(avail, count)
+		ed64->xmitbuf[256 * i] += len;
+		memcpy(ed64->xmitbuf + 256 * i + 1 + pos, buf, len);
+		count -= len;
+		buf += len;
+	}
 
 	if (ed64->mute) {
 		/* fast-path: muted, don't any ed64 thing. */
@@ -892,7 +902,13 @@ static int ed64_probe(struct platform_device *pdev)
 	ed64->pi = dev_get_drvdata(pdev->dev.parent); /* TODO dev.parent->parent is n64pi?? ipaq-micro-leds */
 	ed64->rombase = (0x04000000-0x0800); // TODO configurable or IORESOURCE_MEM/IO?
 	ed64->status = 0; /* TODO is 0 valid for initialize?? (seems ok, it means wrongly "can TX&RX", but overwritten by poll.) */
-	ed64->xmitbuf[0] = 0; /* make buffer empty */
+	/* make buffer empty */
+	{
+		int i;
+		for (i = 0; i < 4; i++) {
+			ed64->xmitbuf[256 * i] = 0;
+		}
+	}
 	ed64->mute = 0;
 
 	platform_set_drvdata(pdev, ed64); /* ed64 set to uart_port, but same here for sysfs attributes. */
