@@ -49,4 +49,4 @@ const char * sym_get_string_value(struct symbol *sym);
 const char * prop_get_type_name(enum prop_type type);
 
 /* expr.c */
-void expr_print(struct expr *e, void (*fn)(void *, struct symbol *, const char *), void *data, int prevtoken);
+void expr_print(struct expr *e, void (*fn)(void *, struct symbol *, const char *), void *data, int prevtoken, int level);

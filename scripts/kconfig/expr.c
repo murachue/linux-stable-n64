@@ -1070,15 +1070,17 @@ struct expr *expr_simplify_unmet_dep(struct expr *e1, struct expr *e2)
 	return expr_get_leftmost_symbol(ret);
 }
 
-void expr_print(struct expr *e, void (*fn)(void *, struct symbol *, const char *), void *data, int prevtoken)
+void expr_print(struct expr *e, void (*fn)(void *, struct symbol *, const char *), void *data, int prevtoken, int level)
 {
 	if (!e) {
 		fn(data, NULL, "y");
 		return;
 	}
 
-	if (expr_compare_type(prevtoken, e->type) > 0)
+	if (expr_compare_type(prevtoken, e->type) > 0) {
 		fn(data, NULL, "(");
+		level++;
+	}
 	switch (e->type) {
 	case E_SYMBOL:
 		if (e->left.sym->name)
@@ -1088,7 +1090,7 @@ void expr_print(struct expr *e, void (*fn)(void *, struct symbol *, const char *
 		break;
 	case E_NOT:
 		fn(data, NULL, "!");
-		expr_print(e->left.expr, fn, data, E_NOT);
+		expr_print(e->left.expr, fn, data, E_NOT, level);
 		break;
 	case E_EQUAL:
 		if (e->left.sym->name)
@@ -1125,20 +1127,22 @@ void expr_print(struct expr *e, void (*fn)(void *, struct symbol *, const char *
 		fn(data, e->right.sym, e->right.sym->name);
 		break;
 	case E_OR:
-		expr_print(e->left.expr, fn, data, E_OR);
+		expr_print(e->left.expr, fn, data, E_OR, level);
 		fn(data, NULL, " || ");
-		expr_print(e->right.expr, fn, data, E_OR);
+		if (level == 0)
+			fn(data, NULL, "\n  ");
+		expr_print(e->right.expr, fn, data, E_OR, level);
 		break;
 	case E_AND:
-		expr_print(e->left.expr, fn, data, E_AND);
+		expr_print(e->left.expr, fn, data, E_AND, level);
 		fn(data, NULL, " && ");
-		expr_print(e->right.expr, fn, data, E_AND);
+		expr_print(e->right.expr, fn, data, E_AND, level);
 		break;
 	case E_LIST:
 		fn(data, e->right.sym, e->right.sym->name);
 		if (e->left.expr) {
 			fn(data, NULL, " ^ ");
-			expr_print(e->left.expr, fn, data, E_LIST);
+			expr_print(e->left.expr, fn, data, E_LIST, level);
 		}
 		break;
 	case E_RANGE:
@@ -1156,8 +1160,10 @@ void expr_print(struct expr *e, void (*fn)(void *, struct symbol *, const char *
 		break;
 	  }
 	}
-	if (expr_compare_type(prevtoken, e->type) > 0)
+	if (expr_compare_type(prevtoken, e->type) > 0) {
 		fn(data, NULL, ")");
+		level--;
+	}
 }
 
 static void expr_print_file_helper(void *data, struct symbol *sym, const char *str)
@@ -1167,7 +1173,7 @@ static void expr_print_file_helper(void *data, struct symbol *sym, const char *s
 
 void expr_fprint(struct expr *e, FILE *out)
 {
-	expr_print(e, expr_print_file_helper, out, E_NONE);
+	expr_print(e, expr_print_file_helper, out, E_NONE, 0);
 }
 
 static void expr_print_gstr_helper(void *data, struct symbol *sym, const char *str)
@@ -1202,5 +1208,5 @@ static void expr_print_gstr_helper(void *data, struct symbol *sym, const char *s
 
 void expr_gstr_print(struct expr *e, struct gstr *gs)
 {
-	expr_print(e, expr_print_gstr_helper, gs, E_NONE);
+	expr_print(e, expr_print_gstr_helper, gs, E_NONE, 0);
 }
