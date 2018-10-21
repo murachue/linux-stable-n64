@@ -253,6 +253,10 @@ static int ed64mmc_block_write(struct ed64mmc_host *host, const u8 *buf, int len
 	struct n64pi *pi = host->pi;
 	int crcs[4] = {0};
 	int i, j, d;
+	unsigned int crcstatus[4] = {0}; /* TODO only [0] is required (DAT1-3 is any value?) */
+#ifdef DEBUG
+	int precstclk, prebusyclk, busyclk;
+#endif
 
 	/* TODO support 1-bit width */
 	if (host->datwidth == 0) {
@@ -288,11 +292,83 @@ static int ed64mmc_block_write(struct ed64mmc_host *host, const u8 *buf, int len
 	/* send stop bit(s) */
 	/* 4lines-1bit data write */
 	ed64_spicfg(host, ED64_SPICFG_1BIT | ED64_SPICFG_DAT, 0);
-	ed64_spiwrite(pi, 0xFF);
+	ed64_spiwrite(pi, 0xFF); /* stop bit on 4DATs */
 
-	/* wait for write completion at card */
+	/* wait for crc status token from card */
+	/* note: "SD Specifications Part 1 Physical Layer Simplified Specification V6.00" lies,
+	 *       or at least, inconsistent about crc status token.
+	 *       No such description in 4.3.4 Block Write.
+	 *       Suspicious thin block at just before "busy" in Figure 3-6.
+	 *       In 5.7.2.2 Extension Register Write Command (Single Block), there is a following text:
+	 *       "Bus timing of this command is equivalent to a single block write command (CMD24)."
+	 *       And in Figure 5-8 and 5-9, there is "CRC Status" after CRC and just before Busy, on the "DAT[3:0]" line.
+	 *       This is the only "CRC Status" appearance.
+	 *       On the other hand, "SanDisk SD Card Product Manual V2.2" Section 4.12 explicitly denotes "CRC Status",
+	 *       and it appears only on the DAT0 line. */
 	/* 4lines-1bit data read */
 	ed64_spicfg(host, ED64_SPICFG_1BIT | ED64_SPICFG_DAT | ED64_SPICFG_RD, 0);
+
+	/* wait for start bit on DAT0 */
+	for (i = TRANSFER_TIMEOUT; i; i--) {
+		/* DAT0 is low: start bit of crc status token */
+		if (!(ed64_spiread(pi, 0xFF/* previously received as 0x?F */) & 1)) {
+			break;
+		}
+	}
+	if (i == 0) {
+		/* no crc status token response for this write block... something happened in previous (not this) write block? */
+		pr_debug("ed64mmc_b_w: crc-status-token timed out\n");
+		return -ETIMEDOUT;
+	}
+#ifdef DEBUG
+	precstclk = TRANSFER_TIMEOUT - i;
+#endif
+
+	/* receive crc status (3 bits) and stop bit (1 bit) on DAT0 (and other DATs for debug inspection) */
+	/* 8bit data read */
+	ed64_spicfg(host, ED64_SPICFG_DAT | ED64_SPICFG_RD, 0);
+
+	{
+		for (i = 0; i < 2; i++) { /* bytes (4bit*4/8bit = "2") */
+			unsigned int v = ed64_spiread(pi, 0xFF/* something to clock */);
+			for (j = 0; j < 2; j++) { /* nibbles (4bit*"2" / 8bit) */
+				for (d = 3; 0 <= d; d--) {
+					crcstatus[d] <<= 1;
+					crcstatus[d] |= (v >> 7) & 1;
+					v <<= 1;
+				}
+			}
+		}
+
+		/* check crc status only on DAT0 */
+		if (crcstatus[0] != 0x05) { /* other than 010_1=crcok_stopbit is error. */
+			if (crcstatus[0] == 0x0B) { /* especially 101_1=crcng_stopbit is CRC error. */
+				pr_err("ed64mmc_b_w: crc error\n");
+				pr_debug("edmmc_b_w: pc=%d c=%X,%X,%X,%X\n", precstclk, crcstatus[0], crcstatus[1], crcstatus[2], crcstatus[3]);
+				return -EIO;
+			} else {
+				pr_err("ed64mmc_b_w: unknown write error %X\n", crcstatus[0]);
+				pr_debug("edmmc_b_w: pc=%d c=%X,%X,%X,%X\n", precstclk, crcstatus[0], crcstatus[1], crcstatus[2], crcstatus[3]);
+				return -EILSEQ;
+			}
+		}
+	}
+
+	/* CRC has OK, wait for write completion at card */
+	/* 4lines-1bit data read */
+	ed64_spicfg(host, ED64_SPICFG_1BIT | ED64_SPICFG_DAT | ED64_SPICFG_RD, 0);
+
+	/* wait for busy */
+	for (i = TRANSFER_TIMEOUT; i; i--) {
+		/* DAT0 is low: into busy */
+		if (!(ed64_spiread(pi, 0xFF/* previously received as 0x?F */) & 1)) {
+			break;
+		}
+	}
+#ifdef DEBUG
+	prebusyclk = TRANSFER_TIMEOUT - i;
+#endif
+	/* if it time-outs, may be sd card is too high-speed. for fall-through. */
 
 	/* wait until busy */
 	for (i = TRANSFER_TIMEOUT; i; i--) {
@@ -301,9 +377,15 @@ static int ed64mmc_block_write(struct ed64mmc_host *host, const u8 *buf, int len
 			break;
 		}
 	}
+#ifdef DEBUG
+	busyclk = TRANSFER_TIMEOUT - i;
+#endif
 	if (i == 0) {
+		pr_debug("ed64mmc_b_w: busy timed out cst=%d prebusy=%d\n", precstclk, prebusyclk);
 		return -ETIMEDOUT;
 	}
+
+	pr_debug("edmmc_b_w: wr ok pc=%d c=%X,%X,%X,%X pb=%d b=%d\n", precstclk, crcstatus[0], crcstatus[1], crcstatus[2], crcstatus[3], prebusyclk, busyclk);
 
 	return 0;
 }
@@ -456,7 +538,7 @@ static void ed64mmc_request(struct mmc_host *mmc, struct mmc_request *mrq)
 	struct n64pi *pi = host->pi;
 
 	pr_debug("=============================\n");
-	pr_debug("ed64mmc_request opcode=%i arg=%08X spicfg=%02X data=%p\n", cmd->opcode, cmd->arg, host->spicfg, data);
+	pr_debug("ed64mmc_request cmd %u:%08X cfg=%02X b=%d data=%p\n", cmd->opcode, cmd->arg, host->spicfg, host->datwidth, data);
 
 	n64pi_begin(pi);
 
@@ -478,7 +560,7 @@ static void ed64mmc_request(struct mmc_host *mmc, struct mmc_request *mrq)
 
 	/* SetBlockCount if specified (TODO mrq->sbc->error handling) */
 	if (mrq->sbc) {
-		pr_debug("ed64mmc_request sbc opcode=%i arg=%08X spicfg=%02X\n", mrq->sbc->opcode, mrq->sbc->arg, host->spicfg);
+		pr_debug("ed64mmc_request sbc %u:%08X cfg=%02X\n", mrq->sbc->opcode, mrq->sbc->arg, host->spicfg);
 		ed64mmc_send_command(host, mrq->sbc, 0);
 		ed64mmc_recv_cmd(host, mrq->sbc);
 	}
@@ -549,11 +631,11 @@ static void ed64mmc_request(struct mmc_host *mmc, struct mmc_request *mrq)
 				kunmap(page);
 				flush_dcache_page(page);
 				if (result) {
-					dev_err(dev, "ed64mmc_request: cmd %i block transfer failed\n", cmd->opcode);
+					dev_err(dev, "ed64mmc_request: cmd %i block %s transfer failed\n", cmd->opcode, (data->flags & MMC_DATA_READ) ? "read" : "write");
 					cmd->error = result;
 					break;
 				} else {
-					pr_debug("transfer ok: %xh bytes\n", len);
+					pr_debug("transfer ok: %xh bytes %s\n", len, (data->flags & MMC_DATA_READ) ? "rd" : "wr");
 					data->bytes_xfered += len;
 				}
 			}
@@ -589,7 +671,7 @@ static void ed64mmc_request(struct mmc_host *mmc, struct mmc_request *mrq)
 
 	/* stop command if specified (TODO mrq->stop->error handling) */
 	if (mrq->stop) {
-		pr_debug("ed64mmc_request stop opcode=%i arg=%08X spicfg=%02X\n", mrq->stop->opcode, mrq->stop->arg, host->spicfg);
+		pr_debug("ed64mmc_request stop %u:%08X cfg=%02X\n", mrq->stop->opcode, mrq->stop->arg, host->spicfg);
 		ed64mmc_send_command(host, mrq->stop, 0);
 		ed64mmc_recv_cmd(host, mrq->stop);
 	}
