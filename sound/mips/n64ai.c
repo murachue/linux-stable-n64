@@ -318,14 +318,14 @@ static snd_pcm_uframes_t snd_n64ai_pcm_pointer(struct snd_pcm_substream *substre
 }
 
 static struct snd_pcm_ops snd_n64ai_playback_ops = {
-	.open =        snd_n64ai_playback_open,
-	.close =       snd_n64ai_playback_close,
-	.ioctl =       snd_pcm_lib_ioctl,
-	.hw_params =   snd_n64ai_pcm_hw_params,
-	.hw_free =     snd_n64ai_pcm_hw_free,
-	.prepare =     snd_n64ai_pcm_prepare,
-	.trigger =     snd_n64ai_pcm_trigger,
-	.pointer =     snd_n64ai_pcm_pointer,
+	.open      = snd_n64ai_playback_open,
+	.close     = snd_n64ai_playback_close,
+	.ioctl     = snd_pcm_lib_ioctl,
+	.hw_params = snd_n64ai_pcm_hw_params,
+	.hw_free   = snd_n64ai_pcm_hw_free,
+	.prepare   = snd_n64ai_pcm_prepare,
+	.trigger   = snd_n64ai_pcm_trigger,
+	.pointer   = snd_n64ai_pcm_pointer,
 };
 
 static irqreturn_t snd_n64ai_isr(int irq, void *dev_id)
