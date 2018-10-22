@@ -166,7 +166,9 @@ static int ed64mmc_block_read(struct ed64mmc_host *host, u8 *buf, int len)
 		int crcs[4] = {0};
 		int readcrcs[4] = {0};
 		int i, d;
-int starttime;
+#ifdef DEBUG
+		int starttime;
+#endif
 
 		/* 4lines-1bit data read */
 		ed64_spicfg(host, ED64_SPICFG_1BIT | ED64_SPICFG_DAT | ED64_SPICFG_RD, 0);
@@ -181,7 +183,9 @@ int starttime;
 		if (i == 0) {
 			return -ETIMEDOUT;
 		}
-starttime=TRANSFER_TIMEOUT-i;
+#ifdef DEBUG
+		starttime = TRANSFER_TIMEOUT - i;
+#endif
 
 		/* 4lines-2bit data read */
 		ed64_spicfg(host, ED64_SPICFG_DAT | ED64_SPICFG_RD, 0);
@@ -190,7 +194,7 @@ starttime=TRANSFER_TIMEOUT-i;
 		{
 			int cnt = len * (onebit ? 4 : 1); /* in 1bit mode, required 4 times. */
 			unsigned int bbuf = 0;
-			u8 *p = buf; /* FIXME DEBUG keep buf to dump on panic */
+			u8 *p = buf;
 
 			for (i = 0; i < cnt; i++) {
 				u32 byte;
@@ -232,15 +236,17 @@ starttime=TRANSFER_TIMEOUT-i;
 				continue;
 			}
 
-			/* pr_debug */
+#ifdef DEBUG
 			if (onebit) {
-				panic("ed64mmcbr: crc1 mismatch e=%04x a=%04x @%p st=%d\n", readcrcs[0], crcs[0], buf, starttime);
+				pr_debug("ed64mmcbr: crc1 mismatch e=%04x a=%04x @%p st=%d\n", readcrcs[0], crcs[0], buf, starttime);
 			} else {
-				panic("ed64mmcbr: crc4 mismatch e=%04x.%04x.%04x.%04x a=%04x.%04x.%04x.%04x\n",
-								 readcrcs[0], readcrcs[1], readcrcs[2], readcrcs[3],
-								 crcs[0], crcs[1], crcs[2], crcs[3]
-								);
+				pr_debug("ed64mmcbr: crc4 mismatch e=%04x.%04x.%04x.%04x a=%04x.%04x.%04x.%04x @%p st=%d\n",
+						readcrcs[0], readcrcs[1], readcrcs[2], readcrcs[3],
+						crcs[0], crcs[1], crcs[2], crcs[3],
+						buf, starttime);
 			}
+#endif
+
 			return -EIO;
 		}
 	}
@@ -253,9 +259,11 @@ static int ed64mmc_block_write(struct ed64mmc_host *host, const u8 *buf, int len
 	struct n64pi *pi = host->pi;
 	int crcs[4] = {0};
 	int i, j, d;
-	unsigned int crcstatus[4] = {0}; /* TODO only [0] is required (DAT1-3 is any value?) */
 #ifdef DEBUG
+	unsigned int crcstatus[4] = {0};
 	int precstclk, prebusyclk, busyclk;
+#else
+	unsigned int crcstatus = 0;
 #endif
 
 	/* TODO support 1-bit width */
@@ -329,27 +337,43 @@ static int ed64mmc_block_write(struct ed64mmc_host *host, const u8 *buf, int len
 	ed64_spicfg(host, ED64_SPICFG_DAT | ED64_SPICFG_RD, 0);
 
 	{
-		for (i = 0; i < 2; i++) { /* bytes (4bit*4/8bit = "2") */
+		for (i = 0; i < 2; i++) { /* bytes (4bit*4DATs/8bit = "2") */
 			unsigned int v = ed64_spiread(pi, 0xFF/* something to clock */);
-			for (j = 0; j < 2; j++) { /* nibbles (4bit*"2" / 8bit) */
+#ifdef DEBUG
+			for (j = 0; j < 2; j++) { /* nibbles (4DATs*"2" / 8bit) */
 				for (d = 3; 0 <= d; d--) {
 					crcstatus[d] <<= 1;
 					crcstatus[d] |= (v >> 7) & 1;
 					v <<= 1;
 				}
 			}
+#else
+			crcstatus <<= 2;
+			crcstatus |= ((v >> 6) & 2) | ((v >> 3) & 1);
+#endif
 		}
 
 		/* check crc status only on DAT0 */
-		if (crcstatus[0] != 0x05) { /* other than 010_1=crcok_stopbit is error. */
-			if (crcstatus[0] == 0x0B) { /* especially 101_1=crcng_stopbit is CRC error. */
-				pr_err("ed64mmc_b_w: crc error\n");
-				pr_debug("edmmc_b_w: pc=%d c=%X,%X,%X,%X\n", precstclk, crcstatus[0], crcstatus[1], crcstatus[2], crcstatus[3]);
-				return -EIO;
-			} else {
-				pr_err("ed64mmc_b_w: unknown write error %X\n", crcstatus[0]);
-				pr_debug("edmmc_b_w: pc=%d c=%X,%X,%X,%X\n", precstclk, crcstatus[0], crcstatus[1], crcstatus[2], crcstatus[3]);
-				return -EILSEQ;
+		{
+#ifdef DEBUG
+			unsigned int cs = crcstatus[0];
+#else
+			unsigned int cs = crcstatus;
+#endif
+			if (cs != 0x05) { /* other than 010_1=crcok_stopbit is error. */
+				if (cs == 0x0B) { /* especially 101_1=crcng_stopbit is CRC error. */
+					pr_err("ed64mmc_b_w: crc error\n");
+#ifdef DEBUG
+					pr_debug("edmmc_b_w: pc=%d c=%X,%X,%X,%X\n", precstclk, crcstatus[0], crcstatus[1], crcstatus[2], crcstatus[3]);
+#endif
+					return -EIO;
+				} else {
+					pr_err("ed64mmc_b_w: unknown write error %X\n", cs);
+#ifdef DEBUG
+					pr_debug("edmmc_b_w: pc=%d c=%X,%X,%X,%X\n", precstclk, crcstatus[0], crcstatus[1], crcstatus[2], crcstatus[3]);
+#endif
+					return -EILSEQ;
+				}
 			}
 		}
 	}
@@ -381,11 +405,15 @@ static int ed64mmc_block_write(struct ed64mmc_host *host, const u8 *buf, int len
 	busyclk = TRANSFER_TIMEOUT - i;
 #endif
 	if (i == 0) {
+#ifdef DEBUG
 		pr_debug("ed64mmc_b_w: busy timed out cst=%d prebusy=%d\n", precstclk, prebusyclk);
+#endif
 		return -ETIMEDOUT;
 	}
 
+#ifdef DEBUG
 	pr_debug("edmmc_b_w: wr ok pc=%d c=%X,%X,%X,%X pb=%d b=%d\n", precstclk, crcstatus[0], crcstatus[1], crcstatus[2], crcstatus[3], prebusyclk, busyclk);
+#endif
 
 	return 0;
 }
@@ -631,7 +659,7 @@ static void ed64mmc_request(struct mmc_host *mmc, struct mmc_request *mrq)
 				kunmap(page);
 				flush_dcache_page(page);
 				if (result) {
-					dev_err(dev, "ed64mmc_request: cmd %i block %s transfer failed\n", cmd->opcode, (data->flags & MMC_DATA_READ) ? "read" : "write");
+					pr_err("ed64mmc_request: cmd %i block %s transfer failed\n", cmd->opcode, (data->flags & MMC_DATA_READ) ? "read" : "write");
 					cmd->error = result;
 					break;
 				} else {
@@ -689,7 +717,7 @@ static void ed64mmc_request(struct mmc_host *mmc, struct mmc_request *mrq)
 static void ed64mmc_set_ios(struct mmc_host *mmc, struct mmc_ios *ios)
 {
 	struct ed64mmc_host *host = mmc_priv(mmc);
-	dev_dbg(host->dev, "set_ios pm=%d bw=%d clk=%d cs=%d\n", ios->power_mode, ios->bus_width, ios->clock, ios->chip_select);
+	pr_debug("ed64mmc_set_ios pm=%d bw=%d clk=%d cs=%d\n", ios->power_mode, ios->bus_width, ios->clock, ios->chip_select);
 
 	if (ios->power_mode != MMC_POWER_ON) {
 		/* in UNDEFINED, OFF, and UP state are ignored. */
