@@ -349,7 +349,7 @@ static int ed64mmc_block_write(struct ed64mmc_host *host, const u8 *buf, int len
 			}
 #else
 			crcstatus <<= 2;
-			crcstatus |= ((v >> 6) & 2) | ((v >> 3) & 1);
+			crcstatus |= ((v >> 3) & 2) | (v & 1);
 #endif
 		}
 
