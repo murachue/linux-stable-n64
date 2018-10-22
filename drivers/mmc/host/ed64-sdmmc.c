@@ -280,7 +280,7 @@ static int ed64mmc_block_write(struct ed64mmc_host *host, const u8 *buf, int len
 	for (i = 0; i < 8; i++) {
 		u32 byte = 0;
 		for (j = 0; j < 2; j++) {
-			for (d = 3; d >= 0; d++) {
+			for (d = 3; 0 <= d; d--) {
 				byte <<= 1;
 				byte |= (crcs[d] >> 15) & 1;
 				crcs[d] <<= 1;
