@@ -26,6 +26,7 @@
 #include <linux/mfd/n64pi.h>
 
 //#define DEBUG_REQLOG
+//#define DEBUG_BEGINEND
 
 //#define ED64_KRIKZZSTYLE
 
@@ -43,6 +44,12 @@ struct n64pi { /* represents the driver status of the PI device */
 	int ongoing; /* holds boolean means n64pi is locked or not (this have meaning only on UniProcessor that spoils spinlock) */
 	unsigned long flags; /* holds irq flags */
 	int ed64_enabled; /* holds current ED64 regs enabled count */
+#ifdef DEBUG_BEGINEND
+	void *begin_func;
+	unsigned long begin_jiffies;
+	void *end_func;
+	unsigned long end_jiffies;
+#endif
 };
 
 #ifdef DEBUG_REQLOG
@@ -235,6 +242,10 @@ n64pi_begin(struct n64pi *pi) {
 	}
 
 	pi->ongoing = 1;
+#ifdef DEBUG_BEGINEND
+	pi->begin_func = *(void**)((void*)&pi - sizeof(void*));
+	pi->begin_jiffies = jiffies;
+#endif
 }
 EXPORT_SYMBOL_GPL(n64pi_begin);
 
@@ -255,6 +266,10 @@ n64pi_trybegin(struct n64pi *pi) {
 	pi->flags = flags; /* got lock, safe to overwrite. */
 
 	pi->ongoing = 1;
+#ifdef DEBUG_BEGINEND
+	pi->begin_func = *(void**)((void*)&pi - sizeof(void*));
+	pi->begin_jiffies = jiffies;
+#endif
 
 	return N64PI_ERROR_SUCCESS;
 }
@@ -266,6 +281,10 @@ n64pi_end(struct n64pi *pi) {
 
 	/* TODO check pi->ed64_enabled == 0 */
 
+#ifdef DEBUG_BEGINEND
+	pi->end_func = *(void**)((void*)&pi - sizeof(void*));
+	pi->end_jiffies = jiffies;
+#endif
 	pi->ongoing = 0;
 
 	spin_unlock_irqrestore(&pi->lock, pi->flags);
