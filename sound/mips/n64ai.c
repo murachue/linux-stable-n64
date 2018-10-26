@@ -74,9 +74,9 @@ static struct snd_pcm_hardware n64ai_pcm_hw = {
 	.rate_max =         48000,
 	.channels_min =     2,
 	.channels_max =     2,
-	.buffer_bytes_max = 131072*4, /* 131072 frames (TODO smaller, ex. 32768) */
+	.buffer_bytes_max = 131072*4, /* 131072 frames */
 	.period_bytes_min = 8, /* period bytes must be multiply of 8 */
-	.period_bytes_max = 65536*4, /* 65536 frames (TODO smaller, ex. 16384) */
+	.period_bytes_max = 65536*4, /* 65536 frames TODO this is for AI v2.0. AI v1.0 supports only 2^15 bytes (8192 frames) */
 	.periods_min =      1, /* uh too short? */
 	.periods_max =      1024,
 };
@@ -313,7 +313,8 @@ static snd_pcm_uframes_t n64ai_pcm_pointer(struct snd_pcm_substream *substream)
 {
 	struct n64ai *chip = snd_pcm_substream_chip(substream); /* or just substream->private_data ? */
 
-	/* current hardware pointer is not available on Nintendo 64 AI... software fallback. */
+	/* TODO read 0x04 and calculate pos... currently only software pos. */
+	/* note: 0x04 means length left, value is start with length-0x10 and 0x08 step */
 	return bytes_to_frames(substream->runtime, chip->pos);
 }
 
